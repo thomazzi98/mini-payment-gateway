@@ -23,9 +23,9 @@ const hooks = {
 };
 
 for (const [name, contents] of Object.entries(hooks)) {
-  const path = path.join(hooksDirectory, name);
-  writeFileSync(path, contents, { mode: 0o755 });
-  chmodSync(path, 0o755);
+  const hookPath = path.join(hooksDirectory, name);
+  writeFileSync(hookPath, contents, { mode: 0o755 });
+  chmodSync(hookPath, 0o755);
 }
 
-console.log(`Installed git hooks: ${Object.keys(hooks).path.join(', ')}`);
+console.log(`Installed git hooks: ${Object.keys(hooks).join(', ')}`);
