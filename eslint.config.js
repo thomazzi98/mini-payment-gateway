@@ -96,6 +96,17 @@ export default typescriptEslint.config(
         {
           checkFilenames: false,
           replacements: {
+            // The plugin ships defaults that CONTRACT words (application -> app,
+            // environment -> env). This project expands abbreviations, so those
+            // defaults are disabled and the expansions below are added instead.
+            application: false,
+            applications: false,
+            environment: false,
+            environments: false,
+            development: false,
+            production: false,
+            reference: false,
+            references: false,
             transaction: false,
             props: false,
             params: false,
@@ -178,6 +189,15 @@ export default typescriptEslint.config(
           ],
         },
       ],
+    },
+  },
+
+  // Process entrypoints own the process lifecycle: exiting with a status code is
+  // how they report failure to the orchestrator.
+  {
+    files: ['**/main.*.ts', '**/*-cli.ts'],
+    rules: {
+      'unicorn/no-process-exit': 'off',
     },
   },
 
