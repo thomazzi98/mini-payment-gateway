@@ -1,0 +1,26 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "workspaces": {
+    ".": {
+      "entry": ["scripts/*.mjs", "scripts/*.ts", "eslint.config.js", "vitest.config.ts"],
+      "project": ["scripts/**", "*.config.{js,mjs,ts}"]
+    },
+    "apps/api": {
+      "entry": [
+        "src/main.api.ts",
+        "src/main.worker.ts",
+        "src/infrastructure/persistence/migrate-cli.ts"
+      ],
+      "project": ["src/**"]
+    },
+    "apps/provider-simulator": {
+      "entry": ["src/main.ts"],
+      "project": ["src/**"]
+    },
+    "packages/shared": {
+      "entry": ["src/index.ts", "src/server/index.ts"],
+      "project": ["src/**"]
+    }
+  },
+  "ignoreDependencies": ["@vitest/coverage-v8"]
+}

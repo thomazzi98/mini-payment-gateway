@@ -1,0 +1,7 @@
+dist/
+build/
+coverage/
+.next/
+node_modules/
+docs/state-machine.md
+package-lock.json
