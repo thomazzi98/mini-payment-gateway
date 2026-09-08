@@ -1,0 +1,106 @@
+name: mini-payment-gateway
+
+services:
+  postgres:
+    image: postgres:18.4-bookworm
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-payment_gateway}
+      POSTGRES_USER: ${POSTGRES_USER:-payment_gateway_owner}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    # No published port: this network is internal, so a mapping here would be inert.
+    # Inspect with `docker compose exec postgres psql -U $POSTGRES_USER -d $POSTGRES_DB`.
+    volumes:
+      # /var/lib/postgresql, not /var/lib/postgresql/data. PostgreSQL 18's image moved the
+      # data into a version-named subdirectory so that `pg_upgrade --link` works later
+      # without crossing a mount boundary. Mounting the old path makes the image report
+      # data in an "unused mount/volume" and refuse to start.
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      # -h forces a TCP connection. Without it pg_isready uses a unix socket and
+      # reports ready while the server is still refusing network clients.
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-payment_gateway_owner} -d ${POSTGRES_DB:-payment_gateway}',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      # First boot runs initdb, which takes appreciably longer than a warm start.
+      start_period: 45s
+    networks: [internal]
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # Ephemeral by design: rate-limit counters and circuit-breaker state only.
+    # Nothing durable lives here, so no persistence is configured.
+    command: ['redis-server', '--save', '', '--appendonly', 'no']
+    # No published port, same reason as postgres.
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks: [internal]
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    command: ['node', 'apps/api/dist/infrastructure/persistence/migrate-cli.js']
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgres://${POSTGRES_USER:-payment_gateway_owner}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-payment_gateway}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+    restart: 'no'
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      HTTP_HOST: 0.0.0.0
+      HTTP_PORT: 3000
+      DATABASE_URL: postgres://${POSTGRES_USER:-payment_gateway_owner}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-payment_gateway}
+      REDIS_URL: redis://redis:6379
+    ports:
+      - '127.0.0.1:${API_HOST_PORT:-4010}:3000'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    networks: [internal, outbound]
+    restart: unless-stopped
+
+networks:
+  # Datastores live here and are unreachable from anything that talks to the
+  # internet. This is the structural half of SSRF defence for merchant-supplied
+  # webhook URLs; the address-pinning egress policy is the other half.
+  internal:
+    internal: true
+  outbound:
+
+volumes:
+  postgres-data:

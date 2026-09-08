@@ -1,0 +1,26 @@
+# Without this file BuildKit transfers node_modules, .git and every build artifact
+# into the daemon before running a single instruction. On a bind-mounted Windows
+# volume that took over four minutes just to read the Dockerfile.
+
+node_modules
+**/node_modules
+
+.git
+.github
+
+**/dist
+**/build
+**/.next
+**/coverage
+**/*.tsbuildinfo
+
+.env
+.env.*
+!.env.example
+
+**/test-results
+**/playwright-report
+**/.playwright
+
+.vscode
+.idea
