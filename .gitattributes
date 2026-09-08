@@ -1,0 +1,17 @@
+* text=auto eol=lf
+
+# Files executed inside Linux containers must keep LF. A CRLF shebang line makes
+# the kernel report "bad interpreter" and the container exits before it starts.
+*.sh            text eol=lf
+*.mjs           text eol=lf
+*.ts            text eol=lf
+*.js            text eol=lf
+*.sql           text eol=lf
+Dockerfile      text eol=lf
+*.Dockerfile    text eol=lf
+docker-entrypoint* text eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff2 binary
