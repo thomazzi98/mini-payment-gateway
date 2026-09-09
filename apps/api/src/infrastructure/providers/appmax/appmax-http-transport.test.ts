@@ -5,6 +5,7 @@ import { Secret } from '@gateway/shared/server';
 import { afterEach, describe, expect, it } from 'vitest';
 import { AppmaxAuthenticationError, UndiciAppmaxTransport } from './appmax-http-transport.js';
 import type { AppmaxCredentials, TransportLogger } from './appmax-http-transport.js';
+import { APPMAX_ENDPOINTS } from './appmax-endpoints.js';
 import type { AppmaxEndpoints } from './appmax-endpoints.js';
 
 /**
@@ -135,6 +136,45 @@ async function transportFor(respond: Responder) {
     ),
   };
 }
+
+describe('the two environments are genuinely different places', () => {
+  // Nothing asserted this, so a map edited until both entries pointed at sandbox
+  // would have passed every test while silently sending production payments to a
+  // sandbox that cannot take money.
+  it('sends sandbox to the sandbox hosts and production to the production hosts', () => {
+    expect(APPMAX_ENDPOINTS.SANDBOX.authenticationBaseUrl).toBe(
+      'https://auth.sandboxappmax.com.br',
+    );
+    expect(APPMAX_ENDPOINTS.SANDBOX.apiBaseUrl).toBe('https://api.sandboxappmax.com.br');
+    expect(APPMAX_ENDPOINTS.PRODUCTION.authenticationBaseUrl).toBe('https://auth.appmax.com.br');
+    expect(APPMAX_ENDPOINTS.PRODUCTION.apiBaseUrl).toBe('https://api.appmax.com.br');
+  });
+
+  it('never points production at anything sandbox', () => {
+    for (const url of Object.values(APPMAX_ENDPOINTS.PRODUCTION)) {
+      expect(url).not.toContain('sandbox');
+    }
+  });
+
+  it('shares no host between the two', () => {
+    const sandbox = new Set(Object.values(APPMAX_ENDPOINTS.SANDBOX));
+    for (const url of Object.values(APPMAX_ENDPOINTS.PRODUCTION)) {
+      expect(sandbox.has(url)).toBe(false);
+    }
+  });
+
+  it('reaches both over TLS, because the client secret crosses this wire', () => {
+    const everyUrl = Object.values(APPMAX_ENDPOINTS).flatMap((endpoints: AppmaxEndpoints) => [
+      endpoints.authenticationBaseUrl,
+      endpoints.apiBaseUrl,
+    ]);
+
+    expect(everyUrl).toHaveLength(4);
+    for (const url of everyUrl) {
+      expect(url.startsWith('https://')).toBe(true);
+    }
+  });
+});
 
 describe('production endpoints are frozen', () => {
   it('refuses an endpoint override for production', () => {

@@ -47,7 +47,26 @@ export interface ReconciliationDependencies {
   readonly now: () => Date;
 }
 
-export type PaymentResolution =
+/**
+ * Enough to find the payment again without going back to the database, and
+ * nothing a log must not carry. A provider reference is the provider's own
+ * identifier for the order, not a credential.
+ */
+export interface ResolutionSubject {
+  readonly paymentId: string;
+  readonly organizationId: string;
+  readonly environment: 'SANDBOX' | 'PRODUCTION';
+  readonly providerCode: string | undefined;
+  readonly providerReference: string | undefined;
+  readonly attemptId: string | undefined;
+  readonly attempts: number;
+}
+
+/**
+ * What reconciliation concluded, separate from which payment it concluded it
+ * about, so the two can be composed without Omit distributing over the union.
+ */
+export type ResolutionOutcome =
   | { readonly kind: 'resolved'; readonly toStatus: string; readonly trigger: string }
   | { readonly kind: 'already_resolved' }
   /**
@@ -62,6 +81,8 @@ export type PaymentResolution =
   Scheduling has stopped. The payment is an operator's now.
   */
   | { readonly kind: 'awaiting_operator'; readonly reason: string };
+
+export type PaymentResolution = ResolutionSubject & ResolutionOutcome;
 
 export interface ReconciliationRun {
   readonly claimed: number;
@@ -129,16 +150,29 @@ export async function reconcileDuePayments(
   return { claimed: due.length, resolutions };
 }
 
+function subjectOf(payment: DuePayment): ResolutionSubject {
+  return {
+    paymentId: payment.paymentId,
+    organizationId: payment.organizationId,
+    environment: payment.environment,
+    providerCode: payment.providerCode,
+    providerReference: payment.providerReference,
+    attemptId: payment.attemptId,
+    attempts: payment.attempts,
+  };
+}
+
 async function reconcileOne(
   payment: DuePayment,
   dependencies: ReconciliationDependencies,
 ): Promise<PaymentResolution> {
+  const subject = subjectOf(payment);
   const inquiry = await inquire(payment, dependencies);
 
   if (inquiry.kind === 'observed') {
     const applied = await applyObservation(payment, inquiry.observed, dependencies);
     if (applied !== undefined) {
-      return applied;
+      return { ...subject, ...applied };
     }
   }
 
@@ -152,7 +186,7 @@ async function reconcileOne(
       `Reconciliation stopped after ${payment.attempts} inquiries: ${reason}`,
       undefined,
     );
-    return { kind: 'awaiting_operator', reason };
+    return { ...subject, kind: 'awaiting_operator', reason };
   }
 
   const wait = backoffSeconds(payment.attempts, dependencies.schedule);
@@ -164,8 +198,8 @@ async function reconcileOne(
   );
 
   return inquiry.kind === 'observed'
-    ? { kind: 'still_unknown', reason }
-    : { kind: 'cannot_inquire', reason };
+    ? { ...subject, kind: 'still_unknown', reason }
+    : { ...subject, kind: 'cannot_inquire', reason };
 }
 
 type InquiryResult =
@@ -221,7 +255,7 @@ async function applyObservation(
   payment: DuePayment,
   observed: ObservedPaymentState,
   dependencies: ReconciliationDependencies,
-): Promise<PaymentResolution | undefined> {
+): Promise<ResolutionOutcome | undefined> {
   const transition = transitionForObservation(observed);
   if (transition === undefined) {
     return undefined;

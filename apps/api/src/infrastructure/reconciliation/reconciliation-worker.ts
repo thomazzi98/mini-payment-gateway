@@ -44,6 +44,29 @@ export class ReconciliationWorker {
       if (run.claimed === 0) {
         return;
       }
+
+      // One line per payment, carrying what an operator needs to follow it
+      // through the logs and into the database. A provider reference is the
+      // provider's own identifier for the order, never a credential.
+      for (const resolution of run.resolutions) {
+        this.logger.info(
+          {
+            outcome: resolution.kind,
+            paymentId: resolution.paymentId,
+            organizationId: resolution.organizationId,
+            environment: resolution.environment,
+            paymentAttemptId: resolution.attemptId,
+            providerCode: resolution.providerCode,
+            providerReference: resolution.providerReference,
+            reconciliationAttempts: resolution.attempts,
+            ...('toStatus' in resolution && { toStatus: resolution.toStatus }),
+            ...('trigger' in resolution && { trigger: resolution.trigger }),
+            ...('reason' in resolution && { reason: resolution.reason }),
+          },
+          'payment reconciliation outcome',
+        );
+      }
+
       this.logger.info(
         {
           claimed: run.claimed,
