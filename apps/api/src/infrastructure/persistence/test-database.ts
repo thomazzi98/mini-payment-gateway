@@ -110,6 +110,14 @@ function publicIdentifierBody(): string {
   return body;
 }
 
+/**
+ * A valid public identifier with the given prefix. Built here rather than
+ * imported so the fixtures do not depend on the generator they help test.
+ */
+export function publicIdentifierFor(prefix: string): string {
+  return `${prefix}_${publicIdentifierBody()}`;
+}
+
 export async function seedOrganization(pool: Pool, label: string): Promise<SeededOrganization> {
   const slug = `${label}-${uniqueSuffix()}`.toLowerCase().replaceAll(/[^a-z0-9-]/g, '');
   const publicId = `org_${publicIdentifierBody()}`;
