@@ -87,12 +87,20 @@ function elapsedMilliseconds(startedAt: bigint): number {
   return Number(process.hrtime.bigint() - startedAt) / 1_000_000;
 }
 
-export function createDatabase(environment: Environment): Database {
-  const pool = new Pool({
+/**
+ * The one pool this process owns.
+ *
+ * Built here and shared by everything that talks to Postgres, so
+ * DATABASE_MAX_POOL_SIZE means what it says and the statement timeout applies to
+ * every query rather than only the ones that happened to come through Database.
+ * A second pool would silently double the connection count against a server that
+ * has its own max_connections.
+ */
+export function createConnectionPool(environment: Environment): Pool {
+  return new Pool({
     connectionString: environment.DATABASE_URL,
     max: environment.DATABASE_MAX_POOL_SIZE,
     statement_timeout: environment.DATABASE_STATEMENT_TIMEOUT_MILLISECONDS,
     application_name: 'payment-gateway',
   });
-  return new Database(pool);
 }

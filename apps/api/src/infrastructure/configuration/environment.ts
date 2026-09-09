@@ -14,6 +14,16 @@ const environmentSchema = z.object({
   DATABASE_STATEMENT_TIMEOUT_MILLISECONDS: z.coerce.number().int().min(100).default(5000),
 
   REDIS_URL: z.string().min(1),
+
+  // Verifying an API key needs this on every request. It lives outside the
+  // database on purpose: a dump alone must not yield a usable key.
+  API_KEY_PEPPER: z.string().min(32),
+
+  // Absent by default. Without them no Appmax provider is registered, and a
+  // payment is refused with no_provider_available rather than failing obscurely
+  // partway through a call that was never going to work.
+  APPMAX_CLIENT_ID: z.string().default(''),
+  APPMAX_CLIENT_SECRET: z.string().default(''),
 });
 
 export type Environment = z.infer<typeof environmentSchema>;

@@ -10,6 +10,7 @@ import type {
 import type { ProviderDescriptor } from '../../../domain/provider/provider-capability.js';
 import { classifyTransportResult } from '../../../domain/provider/provider-outcome.js';
 import type { TransportResult } from '../../../domain/provider/provider-outcome.js';
+import { classifyAppmaxFailure, requiresTokenRefresh } from './appmax-failure.js';
 import { lifecycleForOrderStatus } from './appmax-mappings.js';
 import {
   normalizePixResponse,
@@ -92,6 +93,34 @@ export class AppmaxPixProvider implements PixPaymentProvider, RefundCapableProvi
     private readonly tokens: AppmaxTokenCache,
   ) {}
 
+  /**
+   * Sends a request and, when Appmax reports the token is no longer good, drops
+   * the cached one so the next call re-authenticates.
+   *
+   * Only a 401 does this. A 403 is a permission the credential does not have,
+   * and re-authenticating would not fix it — it would just spin against a
+   * provider that is already refusing us.
+   */
+  private async send(options: {
+    readonly method: 'GET' | 'POST';
+    readonly path: string;
+    readonly body?: unknown;
+  }): Promise<TransportResponse> {
+    const accessToken = await this.tokens.currentToken();
+    const response = await this.transport.request({
+      method: options.method,
+      path: options.path,
+      accessToken,
+      ...(options.body !== undefined && { body: options.body }),
+    });
+
+    if (requiresTokenRefresh(classifyAppmaxFailure(response.transport))) {
+      this.tokens.invalidate();
+    }
+
+    return response;
+  }
+
   private observedStateFrom(
     response: TransportResponse,
     providerReference: string,
@@ -129,12 +158,9 @@ export class AppmaxPixProvider implements PixPaymentProvider, RefundCapableProvi
   public async createPixInstrument(
     request: CreatePixInstrumentRequest,
   ): Promise<ProviderResult<PixInstrument>> {
-    const accessToken = await this.tokens.currentToken();
-
-    const customer = await this.transport.request({
+    const customer = await this.send({
       method: 'POST',
       path: '/v1/customers',
-      accessToken,
       body: {
         first_name: request.customer.firstName,
         last_name: request.customer.lastName,
@@ -153,10 +179,9 @@ export class AppmaxPixProvider implements PixPaymentProvider, RefundCapableProvi
     // Amounts travel as integer cents, which is what Appmax expects and what the
     // gateway holds, so nothing is converted and nothing can be rounded.
     const amountMinor = Number(request.amountMinor);
-    const order = await this.transport.request({
+    const order = await this.send({
       method: 'POST',
       path: '/v1/orders',
-      accessToken,
       body: {
         customer_id: customerId,
         products_value: amountMinor,
@@ -182,10 +207,9 @@ export class AppmaxPixProvider implements PixPaymentProvider, RefundCapableProvi
       return failureFrom(order, 'Appmax did not return an order identifier.');
     }
 
-    const payment = await this.transport.request({
+    const payment = await this.send({
       method: 'POST',
       path: '/v1/payments/pix',
-      accessToken,
       body: {
         order_id: Number(orderReference),
         payment_data: { pix: { document_number: request.customer.documentNumber } },
@@ -214,11 +238,9 @@ export class AppmaxPixProvider implements PixPaymentProvider, RefundCapableProvi
   public async readPaymentState(
     providerReference: string,
   ): Promise<ProviderResult<ObservedPaymentState>> {
-    const accessToken = await this.tokens.currentToken();
-    const response = await this.transport.request({
+    const response = await this.send({
       method: 'GET',
       path: `/v1/orders/${encodeURIComponent(providerReference)}`,
-      accessToken,
     });
 
     return this.observedStateFrom(response, providerReference);
@@ -227,11 +249,9 @@ export class AppmaxPixProvider implements PixPaymentProvider, RefundCapableProvi
   public async refundInFull(
     providerReference: string,
   ): Promise<ProviderResult<ObservedPaymentState>> {
-    const accessToken = await this.tokens.currentToken();
-    const response = await this.transport.request({
+    const response = await this.send({
       method: 'POST',
       path: '/v1/orders/refund-request',
-      accessToken,
       body: { order_id: Number(providerReference), type: 'total' },
     });
 

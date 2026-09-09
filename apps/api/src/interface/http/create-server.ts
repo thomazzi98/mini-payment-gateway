@@ -4,11 +4,15 @@ import type { Environment } from '../../infrastructure/configuration/environment
 import type { Database } from '../../infrastructure/persistence/database.js';
 import type { ApplicationServer } from './server-types.js';
 import { registerHealthRoutes } from './routes/health.routes.js';
+import { registerPaymentRoutes } from './routes/payment.routes.js';
+import type { PaymentRouteDependencies } from './routes/payment.routes.js';
 
 export interface ServerDependencies {
   readonly environment: Environment;
   readonly logger: Logger;
   readonly database: Database;
+  readonly authentication: PaymentRouteDependencies['authentication'];
+  readonly payments: PaymentRouteDependencies['payments'];
 }
 
 const REQUEST_IDENTIFIER_PATTERN = /^[\w-]{8,64}$/;
@@ -41,6 +45,10 @@ export function createServer(dependencies: ServerDependencies): ApplicationServe
   });
 
   registerHealthRoutes(server, { database: dependencies.database });
+  registerPaymentRoutes(server, {
+    authentication: dependencies.authentication,
+    payments: dependencies.payments,
+  });
 
   return server;
 }

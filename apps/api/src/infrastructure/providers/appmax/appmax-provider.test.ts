@@ -59,6 +59,22 @@ const CUSTOMER_CREATED = ok({ data: { customer: { id: 2023 } } });
 const ORDER_CREATED = ok({ data: { order: { id: 3531, status: 'pendente' } } });
 const PIX_ISSUED = ok({ data: { pix: { emv_code: PIX_CODE, expires_at: '2026-09-09 15:30:00' } } });
 
+function countingTokens() {
+  let issued = 0;
+  return {
+    get issuedCount() {
+      return issued;
+    },
+    cache: new AppmaxTokenCache(() => {
+      issued += 1;
+      return Promise.resolve({
+        accessToken: new Secret(`token-${issued}`),
+        expiresInSeconds: 3600,
+      });
+    }),
+  };
+}
+
 describe('the descriptor', () => {
   it('implements everything it declares', () => {
     expect(() =>
@@ -227,5 +243,52 @@ describe('refunding', () => {
       body: { order_id: 3531, type: 'total' },
     });
     expect(result.outcome === 'success' && result.value.lifecycle).toBe('refunded');
+  });
+});
+
+describe('reacting to a rejected token', () => {
+  /**
+   * A cache that keeps handing out a token Appmax has already rejected would
+   * fail every subsequent call until the token expired on its own.
+   */
+  it('drops the cached token after a 401 so the next call re-authenticates', async () => {
+    const tokens = countingTokens();
+    const transport = transportReturning({
+      transport: { kind: 'response', httpStatus: 401 },
+      body: { message: 'Unauthorized' },
+    });
+    const provider = new AppmaxPixProvider(transport, tokens.cache);
+
+    await provider.readPaymentState('3531');
+    expect(tokens.issuedCount).toBe(1);
+
+    await provider.readPaymentState('3531');
+    expect(tokens.issuedCount).toBe(2);
+  });
+
+  it('keeps the cached token after a 403, which re-authenticating cannot fix', async () => {
+    // Refreshing here would spin against a provider that is already refusing us.
+    const tokens = countingTokens();
+    const transport = transportReturning({
+      transport: { kind: 'response', httpStatus: 403 },
+      body: {},
+    });
+    const provider = new AppmaxPixProvider(transport, tokens.cache);
+
+    await provider.readPaymentState('3531');
+    await provider.readPaymentState('3531');
+
+    expect(tokens.issuedCount).toBe(1);
+  });
+
+  it('keeps the cached token across ordinary successful calls', async () => {
+    const tokens = countingTokens();
+    const transport = transportReturning(ok({ data: { order: { status: 'pendente' } } }));
+    const provider = new AppmaxPixProvider(transport, tokens.cache);
+
+    await provider.readPaymentState('3531');
+    await provider.readPaymentState('3531');
+
+    expect(tokens.issuedCount).toBe(1);
   });
 });

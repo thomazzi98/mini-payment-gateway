@@ -4,6 +4,8 @@ import { EnvironmentValidationError, loadEnvironment } from './environment.js';
 const MINIMUM_VALID = {
   DATABASE_URL: 'postgres://user:password@postgres:5432/payment_gateway',
   REDIS_URL: 'redis://redis:6379',
+  // Long enough to satisfy the schema and obviously not a real pepper.
+  API_KEY_PEPPER: 'a-pepper-for-tests-only-not-a-real-one',
 } satisfies NodeJS.ProcessEnv;
 
 describe('loading configuration', () => {
@@ -41,6 +43,15 @@ describe('loading configuration', () => {
 
     expect(message).toContain('DATABASE_URL');
     expect(message).toContain('REDIS_URL');
+    expect(message).toContain('API_KEY_PEPPER');
+  });
+
+  it('refuses a pepper too short to be worth having', () => {
+    // A short pepper adds no work for someone brute-forcing a stolen hash table,
+    // while giving every operator the impression that it does.
+    expect(() => loadEnvironment({ ...MINIMUM_VALID, API_KEY_PEPPER: 'too-short' })).toThrow(
+      EnvironmentValidationError,
+    );
   });
 
   it('rejects values outside their permitted range', () => {
