@@ -52,7 +52,7 @@ export interface ReconciliationDependencies {
  * nothing a log must not carry. A provider reference is the provider's own
  * identifier for the order, not a credential.
  */
-export interface ResolutionSubject {
+interface ResolutionSubject {
   readonly paymentId: string;
   readonly organizationId: string;
   readonly environment: 'SANDBOX' | 'PRODUCTION';
@@ -66,7 +66,7 @@ export interface ResolutionSubject {
  * What reconciliation concluded, separate from which payment it concluded it
  * about, so the two can be composed without Omit distributing over the union.
  */
-export type ResolutionOutcome =
+type ResolutionOutcome =
   | { readonly kind: 'resolved'; readonly toStatus: string; readonly trigger: string }
   | { readonly kind: 'already_resolved' }
   /**
