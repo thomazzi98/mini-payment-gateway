@@ -389,6 +389,80 @@ describe('applying an outcome that is not a success', () => {
   });
 });
 
+describe('a payment nothing can route', () => {
+  it('fails the payment and releases the claim, rather than stranding the key', async () => {
+    // Before this was handled, every unroutable request left its key answering
+    // "still being processed" to every retry forever, while the orphaned payment
+    // went on holding the merchant reference.
+    const created = await claimPayment();
+
+    await fixture.repository.failRouting({
+      organizationId: created.command.organizationId,
+      paymentId: created.paymentId,
+      reason: 'No configured provider can serve pix in BRL.',
+      idempotencyKey: created.command.idempotencyKey,
+      environment: 'SANDBOX',
+      responseStatus: 422,
+      responseBody: { id: 'pay_rendered', status: 'failed' },
+    });
+
+    const payment = await readPayment(created.paymentId);
+    expect(payment.status).toBe('failed');
+
+    const transitions = await readTransitions(created.paymentId);
+    expect(transitions).toHaveLength(1);
+    expect(transitions[0]?.to_status).toBe('failed');
+    expect(transitions[0]?.trigger_name).toBe('ROUTING_EXHAUSTED');
+    // No provider was contacted, so there is no attempt to point at.
+    expect(transitions[0]?.payment_attempt_id).toBeNull();
+    expect(await readAttempts(created.paymentId)).toHaveLength(0);
+
+    const record = await readIdempotencyRecord(created.command.idempotencyKey);
+    expect(record.state).toBe('completed');
+    expect(record.response_status).toBe(422);
+  });
+
+  it('lets the same key be retried and replayed instead of answering in flight', async () => {
+    const created = await claimPayment();
+    await fixture.repository.failRouting({
+      organizationId: created.command.organizationId,
+      paymentId: created.paymentId,
+      reason: 'nothing can serve it',
+      idempotencyKey: created.command.idempotencyKey,
+      environment: 'SANDBOX',
+      responseStatus: 422,
+      responseBody: { id: 'pay_rendered', status: 'failed' },
+    });
+
+    const replayed = await fixture.repository.createPayment(created.command);
+    expect(replayed.kind).toBe('replayed');
+    if (replayed.kind !== 'replayed') {
+      throw new Error('expected a replay');
+    }
+    expect(replayed.responseStatus).toBe(422);
+  });
+
+  it('frees the merchant reference, so the merchant can try again', async () => {
+    // A live payment holds its reference. A failed one must not, or a merchant
+    // whose first attempt could not be routed can never use that reference again.
+    const created = await claimPayment();
+    await fixture.repository.failRouting({
+      organizationId: created.command.organizationId,
+      paymentId: created.paymentId,
+      reason: 'nothing can serve it',
+      idempotencyKey: created.command.idempotencyKey,
+      environment: 'SANDBOX',
+      responseStatus: 422,
+      responseBody: { id: 'pay_rendered', status: 'failed' },
+    });
+
+    const retried = await fixture.repository.createPayment(
+      commandFor({ merchantReference: created.command.merchantReference }),
+    );
+    expect(retried.kind).toBe('created');
+  });
+});
+
 describe('the idempotency record reflects what the caller was told', () => {
   it('stays in flight until the provider has answered', async () => {
     // Completing it at creation time would let a replay return a payment that has

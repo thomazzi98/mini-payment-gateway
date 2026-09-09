@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { EnvironmentValidationError, loadEnvironment } from './environment.js';
+import {
+  EnvironmentValidationError,
+  loadDatabaseEnvironment,
+  loadEnvironment,
+} from './environment.js';
 
 const MINIMUM_VALID = {
   DATABASE_URL: 'postgres://user:password@postgres:5432/payment_gateway',
@@ -89,5 +93,35 @@ describe('loading configuration', () => {
     }
 
     expect(message).not.toContain('hunter2');
+  });
+});
+
+describe('an entrypoint asks only for what it uses', () => {
+  it('runs migrations without being handed the API key pepper', () => {
+    // The migration runner connects as the schema owner, the most privileged role
+    // in the system. Requiring the pepper there would put a secret into the
+    // environment of the one container that must never need it.
+    const environment = loadDatabaseEnvironment({
+      DATABASE_URL: 'postgres://user:password@postgres:5432/payment_gateway',
+    });
+
+    expect(environment.DATABASE_URL).toContain('postgres://');
+    expect(environment.LOG_LEVEL).toBe('info');
+    expect(Object.keys(environment)).not.toContain('API_KEY_PEPPER');
+  });
+
+  it('still refuses to run migrations without a database', () => {
+    expect(() => loadDatabaseEnvironment({})).toThrow(EnvironmentValidationError);
+  });
+
+  it('does not let the api start on the database subset alone', () => {
+    // The api reads the pepper on every request, so it must fail at startup
+    // rather than on the first authentication attempt.
+    expect(() =>
+      loadEnvironment({
+        DATABASE_URL: 'postgres://user:password@postgres:5432/payment_gateway',
+        REDIS_URL: 'redis://redis:6379',
+      }),
+    ).toThrow(EnvironmentValidationError);
   });
 });

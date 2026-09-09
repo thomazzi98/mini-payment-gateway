@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { Pool } from 'pg';
-import { loadEnvironment } from '../configuration/environment.js';
+import { loadDatabaseEnvironment } from '../configuration/environment.js';
 import { createLogger } from '../logging/logger.js';
 import { applyMigrations, readMigrationFiles } from './migrate.js';
 
@@ -9,7 +9,7 @@ const MIGRATIONS_DIRECTORY =
   process.env.MIGRATIONS_DIRECTORY ??
   path.join(import.meta.dirname, '..', '..', '..', 'migrations');
 
-const environment = loadEnvironment();
+const environment = loadDatabaseEnvironment();
 const logger = createLogger(environment);
 
 const pool = new Pool({

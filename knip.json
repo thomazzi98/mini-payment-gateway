@@ -6,7 +6,11 @@
       "project": ["scripts/**"]
     },
     "apps/api": {
-      "entry": ["src/main.api.ts", "src/infrastructure/persistence/migrate-cli.ts"],
+      "entry": [
+        "src/main.api.ts",
+        "src/infrastructure/persistence/migrate-cli.ts",
+        "src/infrastructure/persistence/seed-api-key-cli.ts"
+      ],
       "project": ["src/**"]
     },
     "packages/shared": {

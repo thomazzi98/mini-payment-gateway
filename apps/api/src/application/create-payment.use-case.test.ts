@@ -25,6 +25,7 @@ const TEST_DESCRIPTOR: ProviderDescriptor = {
 
 interface RecordedCalls {
   readonly opened: { paymentId: string; providerCode: string; attemptNumber: number }[];
+  readonly routingFailures: { paymentId: string; reason: string; responseStatus: number }[];
   readonly applied: {
     outcomeClass: string;
     toStatus: string;
@@ -35,7 +36,7 @@ interface RecordedCalls {
 }
 
 function storeThatCreates(): PaymentCreationStore & { readonly calls: RecordedCalls } {
-  const calls: RecordedCalls = { opened: [], applied: [] };
+  const calls: RecordedCalls = { opened: [], applied: [], routingFailures: [] };
   return {
     calls,
     createPayment: () =>
@@ -51,6 +52,14 @@ function storeThatCreates(): PaymentCreationStore & { readonly calls: RecordedCa
         attemptNumber: command.attemptNumber,
       });
       return Promise.resolve(`attempt-${calls.opened.length}`);
+    },
+    failRouting: (command) => {
+      calls.routingFailures.push({
+        paymentId: command.paymentId,
+        reason: command.reason,
+        responseStatus: command.responseStatus,
+      });
+      return Promise.resolve();
     },
     applyProviderOutcome: (command) => {
       calls.applied.push({
@@ -307,6 +316,7 @@ describe('idempotency reaches the caller unchanged', () => {
         }),
       openAttempt: () => Promise.reject(new Error('must not open an attempt on a replay')),
       applyProviderOutcome: () => Promise.reject(new Error('must not apply an outcome')),
+      failRouting: () => Promise.reject(new Error('must not fail routing on a replay')),
     };
 
     const outcome = await createPayment(INPUT, {
@@ -330,6 +340,7 @@ describe('idempotency reaches the caller unchanged', () => {
       createPayment: () => Promise.resolve({ kind: storeKind } as never),
       openAttempt: () => Promise.reject(new Error('must not open an attempt')),
       applyProviderOutcome: () => Promise.reject(new Error('must not apply an outcome')),
+      failRouting: () => Promise.reject(new Error('must not fail routing')),
     };
 
     const outcome = await createPayment(INPUT, {
@@ -358,5 +369,65 @@ describe('provider selection', () => {
     });
 
     expect(outcome.kind).toBe('no_provider');
+  });
+
+  it('releases the idempotency claim instead of stranding it', async () => {
+    // Returning without resolving the claim left the key answering "still being
+    // processed" to every retry forever, and the payment holding the merchant
+    // reference against a payment that would never go anywhere.
+    const store = storeThatCreates();
+    const outcome = await createPayment(INPUT, {
+      store,
+      providers: new ProviderRegistry([]),
+    });
+
+    expect(store.calls.routingFailures).toHaveLength(1);
+    expect(store.calls.routingFailures[0]?.paymentId).toBe('internal-1');
+    expect(store.calls.routingFailures[0]?.responseStatus).toBe(422);
+    expect(paymentOf(outcome).status).toBe('failed');
+    expect(paymentOf(outcome).failureCode).toBe('no_provider_available');
+  });
+
+  it('never contacts a provider or opens an attempt when nothing can serve it', async () => {
+    const store = storeThatCreates();
+    await createPayment(INPUT, { store, providers: new ProviderRegistry([]) });
+
+    expect(store.calls.opened).toHaveLength(0);
+    expect(store.calls.applied).toHaveLength(0);
+  });
+});
+
+describe('a payment that did not succeed says why', () => {
+  it('names the code and the reason on a refusal', async () => {
+    const outcome = await createPayment(INPUT, {
+      store: storeThatCreates(),
+      providers: registryWith(
+        providerReturning({ outcome: 'definitive_failure', reason: 'credential not permitted' }),
+      ),
+    });
+
+    expect(paymentOf(outcome).failureCode).toBe('provider_rejected');
+    expect(paymentOf(outcome).failureReason).toBe('credential not permitted');
+  });
+
+  it('names the code on an uncertain outcome', async () => {
+    const outcome = await createPayment(INPUT, {
+      store: storeThatCreates(),
+      providers: registryWith(
+        providerReturning({ outcome: 'unknown_outcome', reason: 'no answer in time' }),
+      ),
+    });
+
+    expect(paymentOf(outcome).failureCode).toBe('provider_outcome_unknown');
+  });
+
+  it('says nothing about failure on a payment that succeeded', async () => {
+    const outcome = await createPayment(INPUT, {
+      store: storeThatCreates(),
+      providers: registryWith(providerReturning(GOOD_INSTRUMENT)),
+    });
+
+    expect(paymentOf(outcome).failureCode).toBeUndefined();
+    expect(paymentOf(outcome).failureReason).toBeUndefined();
   });
 });

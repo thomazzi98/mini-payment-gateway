@@ -95,6 +95,14 @@ services:
       HTTP_PORT: 3000
       DATABASE_URL: postgres://payment_gateway_application:${DATABASE_APPLICATION_PASSWORD:?DATABASE_APPLICATION_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-payment_gateway}
       REDIS_URL: redis://redis:6379
+      # Verifying an API key needs this on every request. It lives outside the
+      # database so a dump alone does not yield a usable key, which is also why
+      # the process refuses to start without it rather than defaulting.
+      API_KEY_PEPPER: ${API_KEY_PEPPER:?API_KEY_PEPPER is required}
+      # Absent by default. Without them no Appmax provider is registered and a
+      # payment is refused with no_provider_available, which names the cause.
+      APPMAX_CLIENT_ID: ${APPMAX_CLIENT_ID:-}
+      APPMAX_CLIENT_SECRET: ${APPMAX_CLIENT_SECRET:-}
     ports:
       - '127.0.0.1:${API_HOST_PORT:-4010}:3000'
     depends_on:
@@ -131,6 +139,9 @@ services:
       # Used only to seed fixtures and inspect results, never to assert isolation.
       OWNER_DATABASE_URL: postgres://${POSTGRES_USER:-payment_gateway_owner}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-payment_gateway}
       REDIS_URL: redis://redis:6379
+      # A fixed value, so a test that hashes a key gets the same answer on every
+      # run. It is not a secret and must never be the one used anywhere real.
+      API_KEY_PEPPER: a-pepper-used-only-by-the-test-suite
     depends_on:
       roles:
         condition: service_completed_successfully

@@ -135,6 +135,7 @@ function buildHarness(options: {
         },
         openAttempt: () => Promise.resolve('attempt-1'),
         applyProviderOutcome: () => Promise.resolve(),
+        failRouting: () => Promise.resolve(),
       },
       providers,
     },
@@ -376,11 +377,15 @@ describe('the outcome mapping', () => {
   });
 
   it('reports that no provider can serve the payment rather than failing obscurely', async () => {
+    // A payment row exists, so the caller gets a payment carrying why it failed
+    // rather than a bare error. The same body is stored, so a retry with the same
+    // key replays it instead of being told the request is still running.
     const harness = buildHarness({ withoutProvider: true });
     const response = await post(harness, { key: harness.plaintextKey, idempotencyKey: 'key-1' });
 
     expect(response.statusCode).toBe(422);
-    expect(errorOf(response).code).toBe('no_provider_available');
+    expect(paymentOf(response).status).toBe('failed');
+    expect(paymentOf(response).failureCode).toBe('no_provider_available');
   });
 });
 

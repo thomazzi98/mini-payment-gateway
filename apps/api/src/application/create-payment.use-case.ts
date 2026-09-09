@@ -43,6 +43,23 @@ export interface PaymentCreationStore {
     readonly providerCode: string;
   }): Promise<string>;
 
+  /**
+   * Resolves a payment that never reached a provider at all.
+   *
+   * Without this the claim is stranded: the idempotency record stays in flight
+   * forever, so every retry of that key is told the request is still running, and
+   * the orphaned payment keeps holding the merchant reference.
+   */
+  failRouting(command: {
+    readonly organizationId: string;
+    readonly paymentId: string;
+    readonly reason: string;
+    readonly idempotencyKey: string;
+    readonly environment: 'SANDBOX' | 'PRODUCTION';
+    readonly responseStatus: number;
+    readonly responseBody: unknown;
+  }): Promise<void>;
+
   applyProviderOutcome(command: {
     readonly organizationId: string;
     readonly paymentId: string;
@@ -79,6 +96,12 @@ export interface PaymentView {
   readonly amountMinor: string;
   readonly currency: string;
   readonly merchantReference: string;
+  /**
+   * Present when the payment did not succeed. A stable machine-readable code
+   * plus prose, so a merchant can branch on the code and show the sentence.
+   */
+  readonly failureCode?: string;
+  readonly failureReason?: string;
   readonly instrument?: {
     readonly copyAndPasteCode: string;
     readonly qrCodeImageDataUri?: string;
@@ -101,6 +124,11 @@ const RESPONSE_STATUS = {
   */
   created: 201,
   /**
+   * Nothing could serve the payment, so it is failed and will not be retried.
+   * A payment row exists, so the caller gets a payment rather than a bare error.
+   */
+  no_provider: 422,
+  /**
    * Accepted, not yet resolved. Deliberately not an error: the request may have
    * reached the provider and may have created something payable.
    */
@@ -117,7 +145,12 @@ export type CreatePaymentOutcome =
   | { readonly kind: 'in_flight' }
   | { readonly kind: 'idempotency_conflict' }
   | { readonly kind: 'duplicate_merchant_reference' }
-  | { readonly kind: 'no_provider'; readonly reason: string }
+  | {
+      readonly kind: 'no_provider';
+      readonly reason: string;
+      readonly payment: PaymentView;
+      readonly responseStatus: number;
+    }
   | {
       readonly kind: 'rejected';
       readonly payment: PaymentView;
@@ -212,7 +245,36 @@ export async function createPayment(
 
   const selection = dependencies.providers.selectForPix('pix', input.currency);
   if (!selection.selected) {
-    return { kind: 'no_provider', reason: selection.reason };
+    // The payment is failed, not abandoned. Returning here without resolving the
+    // claim would leave the idempotency key permanently unusable and the merchant
+    // reference held by a payment that will never go anywhere.
+    const routingFailure: PaymentView = {
+      id: claimed.publicId,
+      status: 'failed',
+      amountMinor: input.expectedAmountMinor.toString(),
+      currency: input.currency,
+      merchantReference: input.merchantReference,
+      failureCode: 'no_provider_available',
+      failureReason: selection.reason,
+    };
+    const routingStatus = RESPONSE_STATUS.no_provider;
+
+    await dependencies.store.failRouting({
+      organizationId: input.organizationId,
+      paymentId: claimed.paymentId,
+      reason: selection.reason,
+      idempotencyKey: input.idempotencyKey,
+      environment: input.environment,
+      responseStatus: routingStatus,
+      responseBody: routingFailure,
+    });
+
+    return {
+      kind: 'no_provider',
+      reason: selection.reason,
+      payment: routingFailure,
+      responseStatus: routingStatus,
+    };
   }
 
   const attemptId = await dependencies.store.openAttempt({
@@ -246,17 +308,23 @@ export async function createPayment(
     unusableInstrument === undefined ? outcomeClass : 'unknown_outcome';
   const transition = transitionFor(effectiveOutcome);
 
+  const kind = outcomeKind(effectiveOutcome);
+  const failureReason = unusableInstrument ?? rejection;
+
   const payment: PaymentView = {
     id: claimed.publicId,
     status: transition.toStatus,
     amountMinor: input.expectedAmountMinor.toString(),
     currency: input.currency,
     merchantReference: input.merchantReference,
+    ...(kind !== 'created' && {
+      failureCode: kind === 'uncertain' ? 'provider_outcome_unknown' : 'provider_rejected',
+    }),
+    ...(failureReason !== undefined && { failureReason }),
     ...(instrument !== undefined &&
       unusableInstrument === undefined && { instrument: presentInstrument(instrument) }),
   };
 
-  const kind = outcomeKind(effectiveOutcome);
   const responseStatus = RESPONSE_STATUS[kind];
 
   await dependencies.store.applyProviderOutcome({
@@ -295,7 +363,7 @@ export async function createPayment(
   };
 }
 
-function outcomeKind(outcome: ProviderOutcomeClass): keyof typeof RESPONSE_STATUS {
+function outcomeKind(outcome: ProviderOutcomeClass): 'created' | 'uncertain' | 'rejected' {
   if (outcome === 'success') {
     return 'created';
   }

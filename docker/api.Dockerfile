@@ -37,6 +37,10 @@ RUN npm ci --omit=dev --no-audit --no-fund --ignore-scripts && npm cache clean -
 COPY --from=build /app/packages/shared/dist ./packages/shared/dist
 COPY --from=build /app/apps/api/dist ./apps/api/dist
 COPY apps/api/migrations ./apps/api/migrations
+# Operational entrypoints run against the deployed image, not a checkout. Without
+# these, the documented "docker compose run --rm api npm run validate:appmax"
+# fails with a module-not-found rather than validating anything.
+COPY scripts ./scripts
 
 # Runs unprivileged. The node image already provides uid/gid 1000.
 USER node

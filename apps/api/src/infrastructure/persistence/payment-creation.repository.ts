@@ -35,6 +35,16 @@ export interface RecordAttemptCommand {
   readonly providerCode: string;
 }
 
+export interface FailRoutingCommand {
+  readonly organizationId: string;
+  readonly paymentId: string;
+  readonly reason: string;
+  readonly idempotencyKey: string;
+  readonly environment: 'SANDBOX' | 'PRODUCTION';
+  readonly responseStatus: number;
+  readonly responseBody: unknown;
+}
+
 export interface ApplyOutcomeCommand {
   readonly organizationId: string;
   readonly paymentId: string;
@@ -257,6 +267,72 @@ export class PaymentCreationRepository {
     ]);
   }
 
+  private async completeIdempotencyRecord(
+    client: PoolClient,
+    command: {
+      readonly organizationId: string;
+      readonly environment: 'SANDBOX' | 'PRODUCTION';
+      readonly idempotencyKey: string;
+      readonly responseStatus: number;
+      readonly responseBody: unknown;
+    },
+  ): Promise<void> {
+    await client.query(
+      `UPDATE idempotency_records
+          SET state = 'completed', response_status = $4, response_body = $5,
+              completed_at = now()
+        WHERE organization_id = $1 AND environment = $2 AND idempotency_key = $3`,
+      [
+        command.organizationId,
+        command.environment,
+        command.idempotencyKey,
+        command.responseStatus,
+        JSON.stringify(command.responseBody),
+      ],
+    );
+  }
+
+  /**
+   * Fails a payment that never reached a provider, and releases its claim.
+   *
+   * ROUTING_EXHAUSTED is a declared edge out of pending precisely for this: the
+   * schema anticipated a payment nothing could serve. No attempt exists, so the
+   * transition carries no attempt id.
+   *
+   * Completing the idempotency record here is the part that matters. Left in
+   * flight, the key would answer "still being processed" to every retry forever,
+   * and the payment would go on holding the merchant reference.
+   */
+  public async failRouting(command: FailRoutingCommand): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT set_config($1, $2, true)', [
+        'app.organization_id',
+        command.organizationId,
+      ]);
+
+      await this.moveStatus(client, {
+        paymentId: command.paymentId,
+        organizationId: command.organizationId,
+        toStatus: 'failed',
+        trigger: 'ROUTING_EXHAUSTED',
+        evidenceClass: 'internal',
+        attemptId: null,
+        reason: command.reason,
+      });
+
+      await this.completeIdempotencyRecord(client, command);
+
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   /**
    * Opens an attempt before the provider is called, and records that a request is
    * being sent.
@@ -361,19 +437,7 @@ export class PaymentCreationRepository {
         reason: command.failureReason ?? null,
       });
 
-      await client.query(
-        `UPDATE idempotency_records
-            SET state = 'completed', response_status = $4, response_body = $5,
-                completed_at = now()
-          WHERE organization_id = $1 AND environment = $2 AND idempotency_key = $3`,
-        [
-          command.organizationId,
-          command.environment,
-          command.idempotencyKey,
-          command.responseStatus,
-          JSON.stringify(command.responseBody),
-        ],
-      );
+      await this.completeIdempotencyRecord(client, command);
 
       await client.query('COMMIT');
     } catch (error) {

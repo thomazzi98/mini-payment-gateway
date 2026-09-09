@@ -1,6 +1,6 @@
 import { pino } from 'pino';
 import type { Logger } from 'pino';
-import type { Environment } from '../configuration/environment.js';
+import type { DatabaseEnvironment } from '../configuration/environment.js';
 
 export type { Logger } from 'pino';
 
@@ -31,7 +31,7 @@ const REDACTED_PATHS = [
   'apiKey',
 ];
 
-export function createLogger(environment: Environment): Logger {
+export function createLogger(environment: DatabaseEnvironment): Logger {
   return pino({
     level: environment.LOG_LEVEL,
     redact: { paths: REDACTED_PATHS, censor: '[redacted]' },

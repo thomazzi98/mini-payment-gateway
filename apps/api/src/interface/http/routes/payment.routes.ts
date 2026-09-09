@@ -213,16 +213,6 @@ function errorFor(outcome: CreatePaymentOutcome, requestId: string): ApiError {
       requestId,
     });
   }
-  if (outcome.kind === 'no_provider') {
-    return apiError({
-      httpStatus: 422,
-      type: 'invalid_request_error',
-      code: 'no_provider_available',
-      message: 'No configured provider can serve this payment.',
-      requestId,
-    });
-  }
-
   return apiError({
     httpStatus: 500,
     type: 'api_error',
