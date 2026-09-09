@@ -26,7 +26,8 @@ export type CreatePaymentResult =
   | { readonly kind: 'replayed'; readonly responseStatus: number; readonly responseBody: unknown }
   | { readonly kind: 'in_flight' }
   | { readonly kind: 'conflict' }
-  | { readonly kind: 'duplicate_merchant_reference' };
+  | { readonly kind: 'duplicate_merchant_reference' }
+  | { readonly kind: 'amount_exceeds_limit'; readonly maximumAmountMinor: bigint };
 
 export interface RecordAttemptCommand {
   readonly organizationId: string;
@@ -96,10 +97,14 @@ function isUniqueViolationOn(error: unknown, constraintName: string): boolean {
 /**
  * Creates a payment at most once per idempotency key.
  *
- * The claim, the payment and the completion all happen in one transaction. That
- * is what makes the guarantee real: there is no window in which a key is claimed
- * but its payment is missing, and a crash rolls the whole thing back so the
- * merchant may simply retry.
+ * The claim and the payment happen in one transaction, so there is no window in
+ * which a key is claimed but its payment is missing, and a crash rolls both back
+ * so the merchant may simply retry.
+ *
+ * The claim is NOT completed here. The response is not known until a provider has
+ * answered, and completing it early would let a replay return a status and body
+ * the caller never received. Completion happens in applyProviderOutcome or
+ * failRouting, whichever settles the payment.
  *
  * Concurrency is handled by the unique index rather than by checking first. Two
  * simultaneous requests both reach the INSERT; PostgreSQL blocks the second until
@@ -134,6 +139,23 @@ export class PaymentCreationRepository {
     const claimedRecordId = claim.rows[0]?.id;
     if (claimedRecordId === undefined) {
       return this.decideForClaimHeldByAnother(client, command, fingerprint);
+    }
+
+    // Read inside the claim transaction, so a ceiling changed concurrently cannot
+    // be read before the change and applied after it. The trigger on payments
+    // enforces the same rule; this exists so a merchant over the limit is told so
+    // rather than meeting a database exception.
+    const ceiling = await client.query<{ maximum_payment_amount_minor: string }>(
+      'SELECT maximum_payment_amount_minor FROM organizations WHERE id = $1',
+      [command.organizationId],
+    );
+    const ceilingRow = ceiling.rows[0];
+    if (ceilingRow === undefined) {
+      throw new Error('the organization creating a payment does not exist');
+    }
+    const maximumAmountMinor = BigInt(ceilingRow.maximum_payment_amount_minor);
+    if (command.expectedAmountMinor > maximumAmountMinor) {
+      return { kind: 'amount_exceeds_limit', maximumAmountMinor };
     }
 
     const publicId = generatePublicIdentifier('payment');

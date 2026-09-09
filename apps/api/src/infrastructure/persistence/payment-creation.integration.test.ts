@@ -606,3 +606,73 @@ describe('tenant isolation holds through the whole cycle', () => {
     expect(theirs.kind).toBe('created');
   });
 });
+
+describe('the per-organization payment ceiling', () => {
+  it('refuses an amount over the ceiling through the repository', async () => {
+    const command = commandFor({ expectedAmountMinor: 300_001n });
+    const result = await fixture.repository.createPayment(command);
+
+    expect(result.kind).toBe('amount_exceeds_limit');
+    if (result.kind !== 'amount_exceeds_limit') {
+      throw new Error('expected the ceiling to refuse it');
+    }
+    // The default from migration 0001: the R$3.000,00 the legacy system only ever
+    // enforced with a browser alert.
+    expect(result.maximumAmountMinor).toBe(300_000n);
+  });
+
+  it('accepts an amount exactly at the ceiling', async () => {
+    const result = await fixture.repository.createPayment(
+      commandFor({ expectedAmountMinor: 300_000n }),
+    );
+    expect(result.kind).toBe('created');
+  });
+
+  it('is refused by the database even when the application does not check', async () => {
+    // The application check exists so a merchant gets a clean answer. This is the
+    // one that matters: a future write path that forgets the rule still cannot
+    // insert the row.
+    const client = await fixture.applicationPool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT set_config($1, $2, true)', [
+        'app.organization_id',
+        fixture.merchant.id,
+      ]);
+      await expect(
+        client.query(
+          `INSERT INTO payments
+             (public_id, organization_id, environment, merchant_reference, payment_method,
+              currency, expected_amount_minor)
+           VALUES ($1, $2, 'SANDBOX', $3, 'pix', 'BRL', 300001)`,
+          [
+            publicIdentifierFor('pay'),
+            fixture.merchant.id,
+            `reference-${publicIdentifierFor('r')}`,
+          ],
+        ),
+      ).rejects.toThrow(/payment_exceeds_organization_ceiling/);
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
+  });
+
+  it('follows the organization’s own ceiling, not one shared literal', async () => {
+    await fixture.ownerPool.query(
+      'UPDATE organizations SET maximum_payment_amount_minor = $2 WHERE id = $1',
+      [fixture.otherMerchant.id, 50_000],
+    );
+
+    const overTheirs = await fixture.repository.createPayment(
+      commandFor({ organizationId: fixture.otherMerchant.id, expectedAmountMinor: 60_000n }),
+    );
+    expect(overTheirs.kind).toBe('amount_exceeds_limit');
+
+    // The same amount is fine for a merchant whose ceiling is higher.
+    const underMine = await fixture.repository.createPayment(
+      commandFor({ expectedAmountMinor: 60_000n }),
+    );
+    expect(underMine.kind).toBe('created');
+  });
+});

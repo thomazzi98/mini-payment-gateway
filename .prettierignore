@@ -5,3 +5,7 @@ coverage/
 node_modules/
 docs/state-machine.md
 package-lock.json
+
+# Migrations are checksummed once applied. Reformatting one is indistinguishable
+# from tampering, so nothing may rewrite them.
+apps/api/migrations/

@@ -44,6 +44,7 @@ export interface PaymentCreationStore {
     | { readonly kind: 'in_flight' }
     | { readonly kind: 'conflict' }
     | { readonly kind: 'duplicate_merchant_reference' }
+    | { readonly kind: 'amount_exceeds_limit'; readonly maximumAmountMinor: bigint }
   >;
 
   openAttempt(command: {
@@ -166,6 +167,7 @@ export type CreatePaymentOutcome =
   | { readonly kind: 'in_flight' }
   | { readonly kind: 'idempotency_conflict' }
   | { readonly kind: 'duplicate_merchant_reference' }
+  | { readonly kind: 'amount_exceeds_limit'; readonly maximumAmountMinor: bigint }
   | {
       readonly kind: 'no_provider';
       readonly reason: string;
@@ -278,6 +280,9 @@ export async function createPayment(
   }
   if (claimed.kind === 'duplicate_merchant_reference') {
     return { kind: 'duplicate_merchant_reference' };
+  }
+  if (claimed.kind === 'amount_exceeds_limit') {
+    return { kind: 'amount_exceeds_limit', maximumAmountMinor: claimed.maximumAmountMinor };
   }
 
   // The environment comes from the payment, which took it from the API key. A

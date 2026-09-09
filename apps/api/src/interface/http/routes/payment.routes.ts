@@ -229,6 +229,16 @@ function errorFor(outcome: CreatePaymentOutcome, requestId: string): ApiError {
       retryable: true,
     });
   }
+  if (outcome.kind === 'amount_exceeds_limit') {
+    return apiError({
+      httpStatus: 422,
+      type: 'invalid_request_error',
+      code: 'amount_exceeds_limit',
+      message: `This amount exceeds the limit configured for this account, which is ${outcome.maximumAmountMinor} minor units.`,
+      requestId,
+      param: 'amount',
+    });
+  }
   if (outcome.kind === 'duplicate_merchant_reference') {
     return apiError({
       httpStatus: 409,
