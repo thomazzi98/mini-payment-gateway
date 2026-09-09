@@ -179,6 +179,7 @@ async function runCycle(outcome: {
     evidenceClass: outcome.evidenceClass,
     idempotencyKey: created.command.idempotencyKey,
     environment: 'SANDBOX',
+    completesRequest: true,
     responseStatus: outcome.responseStatus,
     responseBody: { id: 'pay_rendered', status: outcome.toStatus },
   });

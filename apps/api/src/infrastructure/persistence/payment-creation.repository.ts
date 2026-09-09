@@ -61,6 +61,12 @@ export interface ApplyOutcomeCommand {
   readonly idempotencyKey: string;
   readonly environment: 'SANDBOX' | 'PRODUCTION';
   /**
+   * False while the payment is still being routed to another provider. The claim
+   * stays open until an outcome is actually returned, so a replay never sees a
+   * response that a later attempt superseded.
+   */
+  readonly completesRequest: boolean;
+  /**
   What the caller is about to be told, stored so a replay says the same thing.
   */
   readonly responseStatus: number;
@@ -437,7 +443,9 @@ export class PaymentCreationRepository {
         reason: command.failureReason ?? null,
       });
 
-      await this.completeIdempotencyRecord(client, command);
+      if (command.completesRequest) {
+        await this.completeIdempotencyRecord(client, command);
+      }
 
       await client.query('COMMIT');
     } catch (error) {

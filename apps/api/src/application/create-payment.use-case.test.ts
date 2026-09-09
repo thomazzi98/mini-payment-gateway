@@ -32,6 +32,8 @@ interface RecordedCalls {
     trigger: string;
     providerReference: string | undefined;
     responseStatus: number;
+    completesRequest: boolean;
+    evidenceClass: string;
   }[];
 }
 
@@ -68,6 +70,8 @@ function storeThatCreates(): PaymentCreationStore & { readonly calls: RecordedCa
         trigger: command.trigger,
         providerReference: command.providerReference,
         responseStatus: command.responseStatus,
+        completesRequest: command.completesRequest,
+        evidenceClass: command.evidenceClass,
       });
       return Promise.resolve();
     },
@@ -169,6 +173,8 @@ describe('a payment that succeeds', () => {
       trigger: 'INSTRUMENT_ISSUED',
       providerReference: '3531',
       responseStatus: 201,
+      completesRequest: true,
+      evidenceClass: 'authenticated_provider_read',
     });
   });
 });
@@ -199,6 +205,24 @@ describe('a payment the provider definitively refuses', () => {
 
     expect(store.calls.applied[0]?.toStatus).toBe('pending');
     expect(store.calls.applied[0]?.trigger).toBe('SAFE_FAILURE_OBSERVED');
+    // Still being routed, so the caller has not been answered yet.
+    expect(store.calls.applied[0]?.completesRequest).toBe(false);
+  });
+
+  it('does not abandon the payment in pending once the candidates run out', async () => {
+    // pending counts as live, so a payment left there holds its merchant
+    // reference and the merchant can never reuse it.
+    const store = storeThatCreates();
+    const outcome = await createPayment(INPUT, {
+      store,
+      providers: registryWith(
+        providerReturning({ outcome: 'safe_failure', reason: 'the request was invalid' }),
+      ),
+    });
+
+    expect(store.calls.routingFailures).toHaveLength(1);
+    expect(paymentOf(outcome).status).toBe('failed');
+    expect(paymentOf(outcome).failureCode).toBe('all_providers_refused');
   });
 });
 
@@ -226,6 +250,8 @@ describe('a payment whose outcome cannot be determined', () => {
       trigger: 'PROVIDER_OUTCOME_UNKNOWN',
       providerReference: '3531',
       responseStatus: 202,
+      completesRequest: true,
+      evidenceClass: 'internal',
     });
   });
 
@@ -429,5 +455,166 @@ describe('a payment that did not succeed says why', () => {
 
     expect(paymentOf(outcome).failureCode).toBeUndefined();
     expect(paymentOf(outcome).failureReason).toBeUndefined();
+  });
+});
+
+function registryOf(...providers: PixPaymentProvider[]): ProviderRegistry {
+  return new ProviderRegistry(
+    providers.map((provider, index) => ({
+      descriptor: provider.descriptor,
+      pix: provider,
+      priority: index + 1,
+    })),
+  );
+}
+
+function namedProvider(code: string, result: ProviderResult<PixInstrument>): PixPaymentProvider {
+  return {
+    descriptor: { ...TEST_DESCRIPTOR, code },
+    createPixInstrument: () => Promise.resolve(result),
+    readPaymentState: () =>
+      Promise.resolve({ outcome: 'unknown_outcome' as const, reason: 'not used here' }),
+  };
+}
+
+describe('failing over to another provider', () => {
+  it('tries the next provider after a safe failure and succeeds there', async () => {
+    const store = storeThatCreates();
+    const outcome = await createPayment(INPUT, {
+      store,
+      providers: registryOf(
+        namedProvider('first', { outcome: 'safe_failure', reason: 'refused, created nothing' }),
+        namedProvider('second', GOOD_INSTRUMENT),
+      ),
+    });
+
+    expect(outcome.kind).toBe('created');
+    expect(store.calls.opened.map((call) => call.providerCode)).toEqual(['first', 'second']);
+    // Attempt numbers are distinct: the schema refuses a duplicate on one payment.
+    expect(store.calls.opened.map((call) => call.attemptNumber)).toEqual([1, 2]);
+    expect(store.calls.applied[1]?.completesRequest).toBe(true);
+  });
+
+  it('never tries another provider after an unknown outcome', async () => {
+    // The first provider may have created something payable. Trying the next one
+    // is exactly how a customer ends up holding two payable codes.
+    const store = storeThatCreates();
+    const outcome = await createPayment(INPUT, {
+      store,
+      providers: registryOf(
+        namedProvider('first', { outcome: 'unknown_outcome', reason: 'timed out' }),
+        namedProvider('second', GOOD_INSTRUMENT),
+      ),
+    });
+
+    expect(outcome.kind).toBe('uncertain');
+    expect(store.calls.opened).toHaveLength(1);
+    expect(store.calls.opened[0]?.providerCode).toBe('first');
+  });
+
+  it('never tries another provider after a definitive refusal', async () => {
+    const store = storeThatCreates();
+    const outcome = await createPayment(INPUT, {
+      store,
+      providers: registryOf(
+        namedProvider('first', { outcome: 'definitive_failure', reason: 'refused outright' }),
+        namedProvider('second', GOOD_INSTRUMENT),
+      ),
+    });
+
+    expect(outcome.kind).toBe('rejected');
+    expect(store.calls.opened).toHaveLength(1);
+  });
+
+  it('closes the payment when every candidate refuses', async () => {
+    const store = storeThatCreates();
+    const outcome = await createPayment(INPUT, {
+      store,
+      providers: registryOf(
+        namedProvider('first', { outcome: 'safe_failure', reason: 'first refused' }),
+        namedProvider('second', { outcome: 'safe_failure', reason: 'second refused' }),
+      ),
+    });
+
+    expect(store.calls.opened).toHaveLength(2);
+    expect(store.calls.routingFailures).toHaveLength(1);
+    expect(outcome.kind).toBe('no_provider');
+    expect(paymentOf(outcome).status).toBe('failed');
+  });
+});
+
+describe('a transport failure that never reached the provider', () => {
+  it('is not audited as a refusal the provider never made', async () => {
+    // PROVIDER_REFUSED on an authenticated read would record a conversation that
+    // never happened, against a provider that never saw the request.
+    const store = storeThatCreates();
+    await createPayment(INPUT, {
+      store,
+      providers: registryWith(
+        providerReturning({
+          outcome: 'retryable_transport_failure',
+          reason: 'the connection was refused',
+        }),
+      ),
+    });
+
+    expect(store.calls.applied[0]?.toStatus).toBe('pending');
+    expect(store.calls.applied[0]?.trigger).toBe('SAFE_FAILURE_OBSERVED');
+    expect(store.calls.applied[0]?.evidenceClass).toBe('internal');
+  });
+
+  it('moves on to the next provider, because nothing was created', async () => {
+    const store = storeThatCreates();
+    const outcome = await createPayment(INPUT, {
+      store,
+      providers: registryOf(
+        namedProvider('first', {
+          outcome: 'retryable_transport_failure',
+          reason: 'connection refused',
+        }),
+        namedProvider('second', GOOD_INSTRUMENT),
+      ),
+    });
+
+    expect(outcome.kind).toBe('created');
+    expect(store.calls.opened).toHaveLength(2);
+  });
+});
+
+describe('an adapter that throws', () => {
+  it('becomes an unknown outcome rather than escaping the use case', async () => {
+    // An escaping exception would unwind past the point where the attempt is
+    // closed, leaving the payment in processing and its claim open forever.
+    const store = storeThatCreates();
+    const thrower: PixPaymentProvider = {
+      descriptor: TEST_DESCRIPTOR,
+      createPixInstrument: () => Promise.reject(new Error('the token endpoint returned 503')),
+      readPaymentState: () =>
+        Promise.resolve({ outcome: 'unknown_outcome' as const, reason: 'not used' }),
+    };
+
+    const outcome = await createPayment(INPUT, { store, providers: registryWith(thrower) });
+
+    expect(outcome.kind).toBe('uncertain');
+    expect(store.calls.applied[0]?.outcomeClass).toBe('unknown_outcome');
+    expect(store.calls.applied[0]?.completesRequest).toBe(true);
+    expect(reasonOf(outcome)).toContain('503');
+  });
+
+  it('does not try another provider after a throw, because nothing is known', async () => {
+    const store = storeThatCreates();
+    const thrower: PixPaymentProvider = {
+      descriptor: { ...TEST_DESCRIPTOR, code: 'first' },
+      createPixInstrument: () => Promise.reject(new Error('boom')),
+      readPaymentState: () =>
+        Promise.resolve({ outcome: 'unknown_outcome' as const, reason: 'not used' }),
+    };
+
+    await createPayment(INPUT, {
+      store,
+      providers: registryOf(thrower, namedProvider('second', GOOD_INSTRUMENT)),
+    });
+
+    expect(store.calls.opened).toHaveLength(1);
   });
 });

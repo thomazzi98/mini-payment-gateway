@@ -77,6 +77,7 @@ async function completeCycle(
     evidenceClass: 'authenticated_provider_read',
     idempotencyKey: command.idempotencyKey,
     environment: command.environment,
+    completesRequest: true,
     responseStatus: outcome.responseStatus,
     responseBody: outcome.body,
   });

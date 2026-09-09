@@ -1,8 +1,18 @@
-import { canFailOver, requiresReconciliation } from '../domain/provider/provider-outcome.js';
+import {
+  canFailOver,
+  canRetrySameProvider,
+  isTerminalForPayment,
+  requiresReconciliation,
+} from '../domain/provider/provider-outcome.js';
 import type { ProviderOutcomeClass } from '../domain/provider/provider-outcome.js';
 import { assertPresentableBrCode } from '../domain/pix/br-code.js';
 import type { ProviderRegistry } from './provider-registry.js';
-import type { CreatePixInstrumentRequest, PixInstrument } from './ports/payment-provider.js';
+import type {
+  CreatePixInstrumentRequest,
+  PixInstrument,
+  PixPaymentProvider,
+  ProviderResult,
+} from './ports/payment-provider.js';
 
 /**
  * Creating a payment, end to end.
@@ -72,6 +82,12 @@ export interface PaymentCreationStore {
     readonly evidenceClass: string;
     readonly idempotencyKey: string;
     readonly environment: 'SANDBOX' | 'PRODUCTION';
+    /**
+     * False while the payment is still being routed. The claim stays open until
+     * an outcome is actually returned to the caller, so a replay never sees a
+     * response that was superseded by the next attempt.
+     */
+    readonly completesRequest: boolean;
     readonly responseStatus: number;
     readonly responseBody: unknown;
   }): Promise<void>;
@@ -129,6 +145,11 @@ const RESPONSE_STATUS = {
    */
   no_provider: 422,
   /**
+   * Every provider that could have served it refused, each confirming it created
+   * nothing. The payment is declined rather than unroutable.
+   */
+  routing_exhausted: 402,
+  /**
    * Accepted, not yet resolved. Deliberately not an error: the request may have
    * reached the provider and may have created something payable.
    */
@@ -185,23 +206,39 @@ function transitionFor(outcome: ProviderOutcomeClass): {
     };
   }
   if (canFailOver(outcome)) {
+    // The provider answered and said it created nothing, so the read is real.
     return {
       toStatus: 'pending',
       trigger: 'SAFE_FAILURE_OBSERVED',
       evidenceClass: 'authenticated_provider_read',
     };
   }
-  if (requiresReconciliation(outcome)) {
+  if (canRetrySameProvider(outcome)) {
+    // Nothing was created, but nobody was read either: the call did not arrive.
+    // Recording this as an authenticated read would audit a conversation that
+    // never happened, and recording it as PROVIDER_REFUSED would blame a
+    // provider that never saw the request.
     return {
-      toStatus: 'unknown',
-      trigger: 'PROVIDER_OUTCOME_UNKNOWN',
+      toStatus: 'pending',
+      trigger: 'SAFE_FAILURE_OBSERVED',
       evidenceClass: 'internal',
     };
   }
+  if (isTerminalForPayment(outcome)) {
+    return {
+      toStatus: 'failed',
+      trigger: 'PROVIDER_REFUSED',
+      evidenceClass: 'authenticated_provider_read',
+    };
+  }
+
+  // Everything else, including any class added later, is treated as unknown.
+  // The conservative reading costs a reconciliation; the optimistic one costs a
+  // duplicate charge.
   return {
-    toStatus: 'failed',
-    trigger: 'PROVIDER_REFUSED',
-    evidenceClass: 'authenticated_provider_read',
+    toStatus: 'unknown',
+    trigger: 'PROVIDER_OUTCOME_UNKNOWN',
+    evidenceClass: 'internal',
   };
 }
 
@@ -243,123 +280,200 @@ export async function createPayment(
     return { kind: 'duplicate_merchant_reference' };
   }
 
-  const selection = dependencies.providers.selectForPix('pix', input.currency);
-  if (!selection.selected) {
-    // The payment is failed, not abandoned. Returning here without resolving the
-    // claim would leave the idempotency key permanently unusable and the merchant
-    // reference held by a payment that will never go anywhere.
-    const routingFailure: PaymentView = {
+  const candidates = dependencies.providers.candidatesForPix('pix', input.currency);
+  if (candidates.length === 0) {
+    return await abandonPayment(input, dependencies, claimed.publicId, claimed.paymentId, {
+      reason: `No configured provider can serve pix in ${input.currency}.`,
+      failureCode: 'no_provider_available',
+      responseStatus: RESPONSE_STATUS.no_provider,
+      kind: 'no_provider',
+    });
+  }
+
+  /**
+   * Failover is bounded by the candidate list and only ever moves forward on a
+   * class that proves nothing was created.
+   *
+   * A success, a definitive refusal and an unknown outcome all stop the loop. The
+   * unknown case is the one that matters: the request may have created something
+   * payable, so trying the next provider is exactly how a customer ends up
+   * holding two payable codes for one order.
+   */
+  let lastRefusal = 'Every provider refused the payment.';
+
+  for (const [index, provider] of candidates.entries()) {
+    const attemptId = await dependencies.store.openAttempt({
+      organizationId: input.organizationId,
+      paymentId: claimed.paymentId,
+      attemptNumber: index + 1,
+      providerCode: provider.descriptor.code,
+    });
+
+    const result = await attemptInstrument(provider, input);
+
+    const outcomeClass: ProviderOutcomeClass = result.outcome;
+    const rejection = result.outcome === 'success' ? undefined : result.reason;
+    const instrument = result.outcome === 'success' ? result.value : undefined;
+
+    // A code that fails its checksum, or asks for the wrong amount, must never be
+    // shown. Treated as uncertain rather than failed: the provider created
+    // something, we simply cannot present it.
+    const unusableInstrument =
+      instrument === undefined
+        ? undefined
+        : rejectUnusableInstrument(instrument, input.expectedAmountMinor);
+
+    const effectiveOutcome: ProviderOutcomeClass =
+      unusableInstrument === undefined ? outcomeClass : 'unknown_outcome';
+    const transition = transitionFor(effectiveOutcome);
+    const kind = outcomeKind(effectiveOutcome);
+    const failureReason = unusableInstrument ?? rejection;
+    const responseStatus = RESPONSE_STATUS[kind];
+
+    const payment: PaymentView = {
       id: claimed.publicId,
-      status: 'failed',
+      status: transition.toStatus,
       amountMinor: input.expectedAmountMinor.toString(),
       currency: input.currency,
       merchantReference: input.merchantReference,
-      failureCode: 'no_provider_available',
-      failureReason: selection.reason,
+      ...(kind !== 'created' && {
+        failureCode: kind === 'uncertain' ? 'provider_outcome_unknown' : 'provider_rejected',
+      }),
+      ...(failureReason !== undefined && { failureReason }),
+      ...(instrument !== undefined &&
+        unusableInstrument === undefined && { instrument: presentInstrument(instrument) }),
     };
-    const routingStatus = RESPONSE_STATUS.no_provider;
 
-    await dependencies.store.failRouting({
+    const canTryAnotherProvider =
+      canFailOver(effectiveOutcome) || canRetrySameProvider(effectiveOutcome);
+
+    await dependencies.store.applyProviderOutcome({
       organizationId: input.organizationId,
       paymentId: claimed.paymentId,
-      reason: selection.reason,
+      attemptId,
+      outcomeClass: effectiveOutcome,
+      providerReference: result.providerReference,
+      failureReason,
+      toStatus: transition.toStatus,
+      trigger: transition.trigger,
+      evidenceClass: transition.evidenceClass,
       idempotencyKey: input.idempotencyKey,
       environment: input.environment,
-      responseStatus: routingStatus,
-      responseBody: routingFailure,
+      // A payment that will be tried against another provider has not answered
+      // the caller yet, so its claim stays open until the loop settles.
+      completesRequest: !canTryAnotherProvider,
+      responseStatus,
+      responseBody: payment,
     });
 
-    return {
-      kind: 'no_provider',
-      reason: selection.reason,
-      payment: routingFailure,
-      responseStatus: routingStatus,
-    };
+    if (kind === 'created') {
+      return { kind, payment, responseStatus };
+    }
+    if (kind === 'uncertain') {
+      return {
+        kind,
+        payment,
+        responseStatus,
+        reason: failureReason ?? 'The provider outcome could not be determined.',
+      };
+    }
+    if (!canTryAnotherProvider) {
+      return {
+        kind,
+        payment,
+        responseStatus,
+        reason: rejection ?? 'The provider refused the payment.',
+      };
+    }
+
+    lastRefusal = failureReason ?? lastRefusal;
   }
 
-  const attemptId = await dependencies.store.openAttempt({
-    organizationId: input.organizationId,
-    paymentId: claimed.paymentId,
-    attemptNumber: 1,
-    providerCode: selection.provider.descriptor.code,
+  // Every candidate refused, each confirming it created nothing. The payment is
+  // back in pending, holding its merchant reference, so it must be closed.
+  return await abandonPayment(input, dependencies, claimed.publicId, claimed.paymentId, {
+    reason: lastRefusal,
+    failureCode: 'all_providers_refused',
+    responseStatus: RESPONSE_STATUS.routing_exhausted,
+    kind: 'no_provider',
   });
+}
 
-  const result = await selection.provider.createPixInstrument({
-    amountMinor: input.expectedAmountMinor,
-    currency: input.currency,
-    description: input.description,
-    reference: input.merchantReference,
-    customer: input.customer,
-  });
+/**
+ * Calls the provider, turning an exception into an outcome rather than letting it
+ * escape.
+ *
+ * An adapter that throws would otherwise unwind past the point where the attempt
+ * is closed, leaving the payment in `processing` and its idempotency claim open
+ * forever. There is no way to tell from an exception whether the request arrived,
+ * so the only honest reading is that we do not know.
+ */
+async function attemptInstrument(
+  provider: PixPaymentProvider,
+  input: CreatePaymentInput,
+): Promise<ProviderResult<PixInstrument>> {
+  try {
+    return await provider.createPixInstrument({
+      amountMinor: input.expectedAmountMinor,
+      currency: input.currency,
+      description: input.description,
+      reference: input.merchantReference,
+      customer: input.customer,
+    });
+  } catch (error) {
+    return {
+      outcome: 'unknown_outcome',
+      reason:
+        error instanceof Error
+          ? `The provider call ended in an error: ${error.message}`
+          : 'The provider call ended in an error.',
+    };
+  }
+}
 
-  const outcomeClass: ProviderOutcomeClass = result.outcome;
-  const rejection = result.outcome === 'success' ? undefined : result.reason;
-  const instrument = result.outcome === 'success' ? result.value : undefined;
-
-  // A code that fails its checksum, or asks for the wrong amount, must never be
-  // shown. Treated as uncertain rather than failed: the provider created
-  // something, we simply cannot present it.
-  const unusableInstrument =
-    instrument === undefined
-      ? undefined
-      : rejectUnusableInstrument(instrument, input.expectedAmountMinor);
-
-  const effectiveOutcome: ProviderOutcomeClass =
-    unusableInstrument === undefined ? outcomeClass : 'unknown_outcome';
-  const transition = transitionFor(effectiveOutcome);
-
-  const kind = outcomeKind(effectiveOutcome);
-  const failureReason = unusableInstrument ?? rejection;
-
+/**
+ * Closes a payment that no provider will carry, and releases its claim.
+ *
+ * Left open, the idempotency key answers "still being processed" to every retry
+ * forever and the payment goes on holding the merchant reference.
+ */
+async function abandonPayment(
+  input: CreatePaymentInput,
+  dependencies: CreatePaymentDependencies,
+  publicId: string,
+  paymentId: string,
+  failure: {
+    readonly reason: string;
+    readonly failureCode: string;
+    readonly responseStatus: number;
+    readonly kind: 'no_provider';
+  },
+): Promise<CreatePaymentOutcome> {
   const payment: PaymentView = {
-    id: claimed.publicId,
-    status: transition.toStatus,
+    id: publicId,
+    status: 'failed',
     amountMinor: input.expectedAmountMinor.toString(),
     currency: input.currency,
     merchantReference: input.merchantReference,
-    ...(kind !== 'created' && {
-      failureCode: kind === 'uncertain' ? 'provider_outcome_unknown' : 'provider_rejected',
-    }),
-    ...(failureReason !== undefined && { failureReason }),
-    ...(instrument !== undefined &&
-      unusableInstrument === undefined && { instrument: presentInstrument(instrument) }),
+    failureCode: failure.failureCode,
+    failureReason: failure.reason,
   };
 
-  const responseStatus = RESPONSE_STATUS[kind];
-
-  await dependencies.store.applyProviderOutcome({
+  await dependencies.store.failRouting({
     organizationId: input.organizationId,
-    paymentId: claimed.paymentId,
-    attemptId,
-    outcomeClass: effectiveOutcome,
-    providerReference: result.providerReference,
-    failureReason: unusableInstrument ?? rejection,
-    toStatus: transition.toStatus,
-    trigger: transition.trigger,
-    evidenceClass: transition.evidenceClass,
+    paymentId,
+    reason: failure.reason,
     idempotencyKey: input.idempotencyKey,
     environment: input.environment,
-    // Stored so a replay answers with the status the caller actually received.
-    responseStatus,
+    responseStatus: failure.responseStatus,
     responseBody: payment,
   });
 
-  if (kind === 'created') {
-    return { kind, payment, responseStatus };
-  }
-  if (kind === 'uncertain') {
-    return {
-      kind,
-      payment,
-      responseStatus,
-      reason: unusableInstrument ?? rejection ?? 'The provider outcome could not be determined.',
-    };
-  }
   return {
-    kind,
+    kind: failure.kind,
+    reason: failure.reason,
     payment,
-    responseStatus,
-    reason: rejection ?? 'The provider refused the payment.',
+    responseStatus: failure.responseStatus,
   };
 }
 

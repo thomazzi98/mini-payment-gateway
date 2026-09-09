@@ -3,6 +3,7 @@ import type { Logger } from '../../infrastructure/logging/logger.js';
 import type { Environment } from '../../infrastructure/configuration/environment.js';
 import type { Database } from '../../infrastructure/persistence/database.js';
 import type { ApplicationServer } from './server-types.js';
+import { registerErrorHandling } from './error-handling.js';
 import { registerHealthRoutes } from './routes/health.routes.js';
 import { registerPaymentRoutes } from './routes/payment.routes.js';
 import type { PaymentRouteDependencies } from './routes/payment.routes.js';
@@ -43,6 +44,8 @@ export function createServer(dependencies: ServerDependencies): ApplicationServe
     void reply.header('referrer-policy', 'no-referrer');
     void reply.header('x-frame-options', 'DENY');
   });
+
+  registerErrorHandling(server);
 
   registerHealthRoutes(server, { database: dependencies.database });
   registerPaymentRoutes(server, {

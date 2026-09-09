@@ -29,6 +29,7 @@ export type ErrorCode =
   | 'idempotency_key_in_flight'
   | 'duplicate_merchant_reference'
   | 'no_provider_available'
+  | 'not_found'
   | 'provider_rejected'
   | 'provider_outcome_unknown'
   | 'internal_error';
@@ -71,6 +72,25 @@ export function apiError(options: {
       },
     },
   };
+}
+
+/**
+ * The answer to anything that went wrong in a way the route did not anticipate.
+ *
+ * Deliberately says nothing. The legacy system returned its raw driver error on a
+ * 500, which hands an attacker the schema and sometimes the connection string;
+ * Fastify's own default does the same with whatever message the exception
+ * carried. The detail belongs in the log, addressable by the request id, which is
+ * the only thing this returns that the caller can act on.
+ */
+export function internalError(requestId: string): ApiError {
+  return apiError({
+    httpStatus: 500,
+    type: 'api_error',
+    code: 'internal_error',
+    message: 'The request could not be completed.',
+    requestId,
+  });
 }
 
 /**

@@ -17,6 +17,7 @@ import {
   parseAppmaxTimestamp,
   readOrderReference,
 } from './appmax-pix-response.js';
+import { AppmaxAuthenticationError } from './appmax-http-transport.js';
 import type { AppmaxTokenCache } from './appmax-token-cache.js';
 
 /**
@@ -101,12 +102,50 @@ export class AppmaxPixProvider implements PixPaymentProvider, RefundCapableProvi
    * and re-authenticating would not fix it — it would just spin against a
    * provider that is already refusing us.
    */
+  /**
+   * Contains the one thing in this adapter that throws.
+   *
+   * The token cache surfaces an authentication failure as an exception, which is
+   * reasonable for a cache but must not escape: this class promises its callers
+   * that it reports outcomes rather than throwing them.
+   */
+  private async currentTokenOrUndefined(): Promise<Secret | undefined> {
+    try {
+      return await this.tokens.currentToken();
+    } catch (error) {
+      // Only an authentication failure is an outcome. The transport has already
+      // logged it with the detail. Anything else is a defect rather than a
+      // provider condition, so it is left to propagate rather than disguised as
+      // a routing decision.
+      if (error instanceof AppmaxAuthenticationError) {
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
   private async send(options: {
     readonly method: 'GET' | 'POST';
     readonly path: string;
     readonly body?: unknown;
   }): Promise<TransportResponse> {
-    const accessToken = await this.tokens.currentToken();
+    /**
+     * A token we could not obtain means the business request was never sent.
+     *
+     * That makes it a safe failure rather than an unknown one, and the
+     * distinction is the whole point of the taxonomy: reported as unknown, an
+     * authentication outage would park every payment in a state only manual
+     * reconciliation can leave. Reported as definitely-not-delivered, the payment
+     * simply moves to the next provider.
+     */
+    const accessToken = await this.currentTokenOrUndefined();
+    if (accessToken === undefined) {
+      return {
+        transport: { kind: 'connection_error', requestDefinitelyNotDelivered: true },
+        body: undefined,
+      };
+    }
+
     const response = await this.transport.request({
       method: options.method,
       path: options.path,

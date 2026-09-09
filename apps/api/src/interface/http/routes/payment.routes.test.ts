@@ -17,6 +17,7 @@ import type { ApiKeyScope } from '../../../domain/api-key/api-key.js';
 import { payableBrCode } from '../../../domain/pix/br-code.test-support.js';
 import type { ProviderDescriptor } from '../../../domain/provider/provider-capability.js';
 import type { ApiErrorBody } from '../errors.js';
+import { registerErrorHandling } from '../error-handling.js';
 import { registerPaymentRoutes } from './payment.routes.js';
 import type { ApplicationServer } from '../server-types.js';
 
@@ -91,6 +92,10 @@ function buildHarness(options: {
   revoked?: boolean;
   providerResult?: ProviderResult<PixInstrument>;
   /**
+   * Makes the store throw, standing in for anything below the route failing.
+   */
+  storeThrows?: Error;
+  /**
    * Omitted entirely to test the "no provider is configured" path.
    */
   withoutProvider?: boolean;
@@ -110,6 +115,7 @@ function buildHarness(options: {
 
   const received: unknown[] = [];
   const server = Fastify() as unknown as ApplicationServer;
+  registerErrorHandling(server);
 
   const provider = providerReturning(options.providerResult ?? GOOD_INSTRUMENT);
   const providers =
@@ -131,6 +137,9 @@ function buildHarness(options: {
       store: {
         createPayment: (command) => {
           received.push(command);
+          if (options.storeThrows !== undefined) {
+            return Promise.reject(options.storeThrows);
+          }
           return Promise.resolve(options.claim ?? CLAIM_CREATED);
         },
         openAttempt: () => Promise.resolve('attempt-1'),
@@ -295,18 +304,76 @@ describe('request validation', () => {
 });
 
 describe('the environment comes from the key, never the body', () => {
-  it('uses the key environment when creating the payment', async () => {
+  it.each(['SANDBOX', 'PRODUCTION'] as const)(
+    'uses the %s key environment',
+    async (environment) => {
+      const harness = buildHarness({ environment });
+      await post(harness, {
+        key: harness.plaintextKey,
+        idempotencyKey: 'key-1',
+        body: { ...VALID_BODY },
+      });
+
+      expect(harness.received[0]).toMatchObject({ environment, organizationId: 'organization-1' });
+    },
+  );
+
+  it('ignores an environment supplied in the body', async () => {
+    // A caller must not be able to ask for production by saying so. The field is
+    // not in the schema, so it is refused outright rather than quietly ignored.
     const harness = buildHarness({ environment: 'SANDBOX' });
-    await post(harness, {
+    const response = await post(harness, {
       key: harness.plaintextKey,
       idempotencyKey: 'key-1',
-      body: { ...VALID_BODY },
+      body: { ...VALID_BODY, environment: 'PRODUCTION' },
     });
 
-    expect(harness.received[0]).toMatchObject({
-      environment: 'SANDBOX',
-      organizationId: 'organization-1',
+    expect(response.statusCode).toBe(422);
+    expect(harness.received).toHaveLength(0);
+  });
+});
+
+describe('nothing internal escapes', () => {
+  it('answers a failure below the route with the documented envelope', async () => {
+    // Fastify's default handler returns the exception's own message, which for a
+    // driver error names the schema and sometimes the connection string.
+    const harness = buildHarness({
+      storeThrows: new Error('duplicate key value violates unique constraint "payments_pkey"'),
     });
+    const response = await post(harness, { key: harness.plaintextKey, idempotencyKey: 'key-1' });
+
+    expect(response.statusCode).toBe(500);
+    expect(errorOf(response).code).toBe('internal_error');
+    expect(errorOf(response).requestId).toBeTruthy();
+
+    expect(response.body).not.toContain('payments_pkey');
+    expect(response.body).not.toContain('unique constraint');
+  });
+
+  it('answers an unknown path in the same envelope as everything else', async () => {
+    const harness = buildHarness({});
+    const response = await harness.server.inject({ method: 'POST', url: '/v1/nope' });
+
+    expect(response.statusCode).toBe(404);
+    expect(errorOf(response).code).toBe('not_found');
+  });
+
+  it('refuses a body that is not JSON without echoing it back', async () => {
+    const harness = buildHarness({});
+    const response = await harness.server.inject({
+      method: 'POST',
+      url: '/v1/payments',
+      headers: {
+        authorization: `Bearer ${harness.plaintextKey}`,
+        'idempotency-key': 'key-1',
+        'content-type': 'application/json',
+      },
+      payload: '{"amount": 1000, oops',
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(errorOf(response).type).toBe('invalid_request_error');
+    expect(response.body).not.toContain('oops');
   });
 });
 
