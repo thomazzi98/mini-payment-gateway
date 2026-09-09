@@ -6,7 +6,8 @@ import { applyMigrations, readMigrationFiles } from './migrate.js';
 
 // dist/infrastructure/persistence -> apps/api, where the migrations directory sits.
 const MIGRATIONS_DIRECTORY =
-  process.env.MIGRATIONS_DIRECTORY ?? path.join(import.meta.dirname, '..', '..', '..', 'migrations');
+  process.env.MIGRATIONS_DIRECTORY ??
+  path.join(import.meta.dirname, '..', '..', '..', 'migrations');
 
 const environment = loadEnvironment();
 const logger = createLogger(environment);

@@ -41,7 +41,3 @@ export function loadEnvironment(source: NodeJS.ProcessEnv = process.env): Enviro
     .join('\n');
   throw new EnvironmentValidationError(issues);
 }
-
-export function isProduction(environment: Environment): boolean {
-  return environment.NODE_ENV === 'production';
-}

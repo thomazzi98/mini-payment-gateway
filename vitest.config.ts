@@ -5,18 +5,34 @@ export default defineConfig({
     projects: [
       {
         test: {
-          name: 'domain',
-          root: './apps/api',
-          include: ['src/domain/**/*.test.ts', 'src/application/**/*.test.ts'],
-          environment: 'node',
-        },
-      },
-      {
-        test: {
           name: 'shared',
           root: './packages/shared',
           include: ['src/**/*.test.ts'],
           environment: 'node',
+        },
+      },
+      {
+        // Everything in the api that needs no external service. Fast, and the
+        // suite that should fail first when something is wrong.
+        test: {
+          name: 'api',
+          root: './apps/api',
+          include: ['src/**/*.test.ts'],
+          exclude: ['src/**/*.integration.test.ts'],
+          environment: 'node',
+        },
+      },
+      {
+        // Runs against a real PostgreSQL. Serial, because these tests assert on
+        // database state and would otherwise race each other.
+        test: {
+          name: 'integration',
+          root: './apps/api',
+          include: ['src/**/*.integration.test.ts'],
+          environment: 'node',
+          testTimeout: 30_000,
+          hookTimeout: 60_000,
+          fileParallelism: false,
         },
       },
       {
@@ -25,17 +41,6 @@ export default defineConfig({
           root: './scripts',
           include: ['**/*.test.mjs'],
           environment: 'node',
-        },
-      },
-      {
-        test: {
-          name: 'integration',
-          root: './apps/api',
-          include: ['src/infrastructure/**/*.test.ts', 'src/interface/**/*.test.ts'],
-          environment: 'node',
-          testTimeout: 30_000,
-          hookTimeout: 60_000,
-          fileParallelism: false,
         },
       },
     ],
