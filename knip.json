@@ -8,6 +8,7 @@
     "apps/api": {
       "entry": [
         "src/main.api.ts",
+        "src/main.worker.ts",
         "src/infrastructure/persistence/migrate-cli.ts",
         "src/infrastructure/persistence/seed-api-key-cli.ts"
       ],

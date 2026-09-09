@@ -11,6 +11,9 @@ import type { AuthenticateApiKeyDependencies } from './application/authenticate-
 import { ProviderRegistry } from './application/provider-registry.js';
 import type { RegisteredProvider } from './application/provider-registry.js';
 import type { CreatePaymentDependencies } from './application/create-payment.use-case.js';
+import { DEFAULT_RECONCILIATION_SCHEDULE } from './application/reconcile-payments.use-case.js';
+import type { ReconciliationDependencies } from './application/reconcile-payments.use-case.js';
+import { PaymentReconciliationRepository } from './infrastructure/persistence/payment-reconciliation.repository.js';
 import {
   AppmaxPixProvider,
   APPMAX_DESCRIPTOR,
@@ -24,6 +27,13 @@ export interface ApplicationContext {
   readonly database: Database;
   readonly authentication: AuthenticateApiKeyDependencies;
   readonly payments: CreatePaymentDependencies;
+  readonly reconciliation: ReconciliationDependencies;
+  /**
+   * The reconciliation backlog, for the worker to report at startup. Separate
+   * from the use case dependencies because it answers a question about the system
+   * rather than participating in resolving a payment.
+   */
+  readonly reconciliationInsight: PaymentReconciliationRepository;
   shutdown(): Promise<void>;
 }
 
@@ -93,9 +103,27 @@ export function buildApplicationContext(): ApplicationContext {
     clock: systemClock,
   };
 
+  // One registry, shared. Payment creation routes through it and reconciliation
+  // looks providers up in it by code, so the two can never disagree about which
+  // provider serves which environment.
+  const providers = new ProviderRegistry(registerProviders(environment, logger));
+
   const payments: CreatePaymentDependencies = {
     store: new PaymentCreationRepository(pool),
-    providers: new ProviderRegistry(registerProviders(environment, logger)),
+    providers,
+  };
+
+  const reconciliationRepository = new PaymentReconciliationRepository(pool);
+  const reconciliation: ReconciliationDependencies = {
+    store: reconciliationRepository,
+    providers,
+    schedule: {
+      ...DEFAULT_RECONCILIATION_SCHEDULE,
+      batchSize: environment.RECONCILIATION_BATCH_SIZE,
+      leaseSeconds: environment.RECONCILIATION_LEASE_SECONDS,
+      maximumAttempts: environment.RECONCILIATION_MAXIMUM_ATTEMPTS,
+    },
+    now: () => new Date(),
   };
 
   return {
@@ -104,6 +132,8 @@ export function buildApplicationContext(): ApplicationContext {
     database,
     authentication,
     payments,
+    reconciliation,
+    reconciliationInsight: reconciliationRepository,
     async shutdown(): Promise<void> {
       // One pool, closed once. Database wraps it rather than owning a second.
       await database.close();

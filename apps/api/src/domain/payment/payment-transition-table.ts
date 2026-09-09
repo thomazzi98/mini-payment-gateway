@@ -65,6 +65,7 @@ export const PAYMENT_TRIGGERS = [
   'RECONCILED_NOT_CREATED',
   'RECONCILED_PAID',
   'RECONCILED_EXPIRED',
+  'RECONCILED_FAILED',
   'RESOLUTION_EXHAUSTED',
   'PAYMENT_CONFIRMED',
   'LATE_PAYMENT_CONFIRMED',
@@ -179,6 +180,13 @@ export const PAYMENT_TRANSITIONS: readonly PaymentTransition[] = [
     trigger: 'RECONCILED_EXPIRED',
     minimumEvidence: 'authenticated_provider_read',
     description: 'Reconciliation found the uncertain instrument had lapsed unpaid.',
+  },
+  {
+    from: 'unknown',
+    to: 'failed',
+    trigger: 'RECONCILED_FAILED',
+    minimumEvidence: 'authenticated_provider_read',
+    description: 'Reconciliation found the provider had positively refused the uncertain attempt.',
   },
   {
     from: 'unknown',

@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from 'pg';
 import { generatePublicIdentifier } from '@gateway/shared';
+import { movePaymentStatus } from './payment-status-move.js';
 import {
   decideForExistingRecord,
   fingerprintRequest,
@@ -244,65 +245,6 @@ export class PaymentCreationRepository {
     return { kind: 'in_flight' };
   }
 
-  /**
-   * Moves a payment and writes the transition that justifies the move.
-   *
-   * Both happen here because the database refuses them apart: a deferred
-   * constraint trigger rejects any status change that commits without a matching,
-   * legal, evidence-backed transition row carrying the same sequence number.
-   *
-   * The caller supplies the transaction, so a move always commits with whatever
-   * else made it true.
-   */
-  private async moveStatus(
-    client: PoolClient,
-    move: {
-      readonly paymentId: string;
-      readonly organizationId: string;
-      readonly toStatus: string;
-      readonly trigger: string;
-      readonly evidenceClass: string;
-      readonly attemptId: string | null;
-      readonly reason: string | null;
-    },
-  ): Promise<void> {
-    // FOR UPDATE so two concurrent movers cannot read the same sequence number
-    // and write two transitions claiming to be the same step.
-    const current = await client.query<{ status: string; status_sequence: string }>(
-      'SELECT status, status_sequence FROM payments WHERE id = $1 FOR UPDATE',
-      [move.paymentId],
-    );
-    const currentRow = current.rows[0];
-    if (currentRow === undefined) {
-      throw new Error('the payment disappeared while an attempt was in flight');
-    }
-    const nextSequence = Number(currentRow.status_sequence) + 1;
-
-    await client.query(
-      `INSERT INTO payment_status_transitions
-         (payment_id, organization_id, sequence_number, from_status, to_status,
-          trigger_name, evidence_class, payment_attempt_id, captured_amount_after, reason)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9)`,
-      [
-        move.paymentId,
-        move.organizationId,
-        nextSequence,
-        currentRow.status,
-        move.toStatus,
-        move.trigger,
-        move.evidenceClass,
-        move.attemptId,
-        move.reason,
-      ],
-    );
-
-    await client.query('UPDATE payments SET status = $2, status_sequence = $3 WHERE id = $1', [
-      move.paymentId,
-      move.toStatus,
-      nextSequence,
-    ]);
-  }
-
   private async completeIdempotencyRecord(
     client: PoolClient,
     command: {
@@ -348,7 +290,7 @@ export class PaymentCreationRepository {
         command.organizationId,
       ]);
 
-      await this.moveStatus(client, {
+      await movePaymentStatus(client, {
         paymentId: command.paymentId,
         organizationId: command.organizationId,
         toStatus: 'failed',
@@ -409,7 +351,7 @@ export class PaymentCreationRepository {
         throw new Error('opening a payment attempt returned no row');
       }
 
-      await this.moveStatus(client, {
+      await movePaymentStatus(client, {
         paymentId: command.paymentId,
         organizationId: command.organizationId,
         toStatus: 'processing',
@@ -463,7 +405,7 @@ export class PaymentCreationRepository {
         ],
       );
 
-      await this.moveStatus(client, {
+      await movePaymentStatus(client, {
         paymentId: command.paymentId,
         organizationId: command.organizationId,
         toStatus: command.toStatus,

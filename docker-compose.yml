@@ -103,6 +103,7 @@ services:
       # payment is refused with no_provider_available, which names the cause.
       APPMAX_CLIENT_ID: ${APPMAX_CLIENT_ID:-}
       APPMAX_CLIENT_SECRET: ${APPMAX_CLIENT_SECRET:-}
+      APPMAX_ENVIRONMENT: ${APPMAX_ENVIRONMENT:-SANDBOX}
     ports:
       - '127.0.0.1:${API_HOST_PORT:-4010}:3000'
     depends_on:
@@ -122,6 +123,31 @@ services:
       timeout: 5s
       retries: 6
       start_period: 15s
+    networks: [internal, outbound]
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    command: ['node', 'apps/api/dist/main.worker.js']
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgres://payment_gateway_application:${DATABASE_APPLICATION_PASSWORD:?DATABASE_APPLICATION_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-payment_gateway}
+      REDIS_URL: redis://redis:6379
+      API_KEY_PEPPER: ${API_KEY_PEPPER:?API_KEY_PEPPER is required}
+      APPMAX_CLIENT_ID: ${APPMAX_CLIENT_ID:-}
+      APPMAX_CLIENT_SECRET: ${APPMAX_CLIENT_SECRET:-}
+      APPMAX_ENVIRONMENT: ${APPMAX_ENVIRONMENT:-SANDBOX}
+      RECONCILIATION_POLL_MILLISECONDS: ${RECONCILIATION_POLL_MILLISECONDS:-5000}
+    depends_on:
+      roles:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    # Reaches Appmax to ask about uncertain payments, and nothing else. Same two
+    # networks as the api for the same reason.
     networks: [internal, outbound]
     restart: unless-stopped
 

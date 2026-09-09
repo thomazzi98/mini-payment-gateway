@@ -38,6 +38,15 @@ const environmentSchema = baseEnvironmentSchema.extend({
   // environment find no provider and are refused, rather than being served a code
   // from the wrong world.
   APPMAX_ENVIRONMENT: z.enum(['SANDBOX', 'PRODUCTION']).default('SANDBOX'),
+
+  // How often the reconciliation worker looks for uncertain payments. Lower costs
+  // idle queries; higher is how long a resolvable payment stays uncertain.
+  RECONCILIATION_POLL_MILLISECONDS: z.coerce.number().int().min(250).default(5000),
+  RECONCILIATION_BATCH_SIZE: z.coerce.number().int().min(1).max(500).default(20),
+  // Long enough to cover an inquiry, short enough that a worker that dies does not
+  // delay a payment noticeably. It is a lease, never a lock.
+  RECONCILIATION_LEASE_SECONDS: z.coerce.number().int().min(5).max(3600).default(120),
+  RECONCILIATION_MAXIMUM_ATTEMPTS: z.coerce.number().int().min(1).max(100).default(12),
 });
 
 export type Environment = z.infer<typeof environmentSchema>;

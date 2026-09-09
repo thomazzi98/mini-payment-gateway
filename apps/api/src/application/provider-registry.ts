@@ -1,4 +1,4 @@
-import { canServeMethod } from '../domain/provider/provider-capability.js';
+import { canServeMethod, hasCapability } from '../domain/provider/provider-capability.js';
 import type { PaymentMethod, ProviderDescriptor } from '../domain/provider/provider-capability.js';
 import type { PixPaymentProvider } from './ports/payment-provider.js';
 
@@ -62,6 +62,39 @@ export class ProviderRegistry {
       .toSorted((left, right) => left.priority - right.priority)
       .map((entry) => entry.pix)
       .filter((provider): provider is PixPaymentProvider => provider !== undefined);
+  }
+
+  /**
+   * The provider that can be asked about a payment it already handled.
+   *
+   * Looked up by code rather than routed to, because reconciliation must ask the
+   * provider that was actually used and no other. Reading state is a declared
+   * capability: a provider that cannot answer questions about a payment is
+   * reported as such rather than being called and made to refuse, which would turn
+   * a routing fact into a runtime failure.
+   */
+  public selectForPixStatus(
+    providerCode: string,
+    environment: 'SANDBOX' | 'PRODUCTION',
+  ): ProviderSelection {
+    const entry = this.registered.find(
+      (candidate) =>
+        candidate.descriptor.code === providerCode && candidate.environment === environment,
+    );
+
+    if (entry?.pix === undefined) {
+      return {
+        selected: false,
+        reason: `No ${providerCode} provider is configured for ${environment}, so its payments cannot be inquired about.`,
+      };
+    }
+    if (!hasCapability(entry.descriptor, 'pix.status')) {
+      return {
+        selected: false,
+        reason: `${providerCode} does not declare pix.status, so it cannot be asked about a payment it created.`,
+      };
+    }
+    return { selected: true, provider: entry.pix };
   }
 
   public selectForPix(
