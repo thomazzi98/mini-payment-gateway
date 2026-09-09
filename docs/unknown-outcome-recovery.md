@@ -179,13 +179,13 @@ worse than none.
 1. **There is no reconciliation worker.** `readPaymentState` is implemented and
    the evidence needed to drive it is recorded, but nothing schedules it. Every
    procedure above is currently manual, and no payment resolves itself.
-2. **A claim stranded by a crash blocks its key indefinitely.** If the process
-   dies between opening the attempt and applying the outcome, the idempotency
-   record stays `in_flight`. `idempotency_records` carries an `expires_at` (24
-   hours) and an index on it, but the claim path does not consult it and nothing
-   sweeps expired rows, so a merchant retrying that key receives `409
-idempotency_key_in_flight` forever rather than for 24 hours. The payment
-   itself is intact and recoverable by the procedures above; it is the _retry_
-   that is blocked.
+2. **A claim stranded by a crash still needs reconciliation to clear.** If the
+   process dies between opening the attempt and applying the outcome, the
+   idempotency record stays `in_flight`. Past its 24-hour expiry the gateway now
+   reports that honestly — `409 idempotency_key_stranded`, not retryable, rather
+   than telling the merchant to retry shortly forever — but it deliberately does
+   not hand the key back to be claimed again, because the payment that claim
+   created may have reached a provider and may be payable. Only resolving that
+   payment, by the procedures above, clears it.
 3. **Expiry is not driven from the provider's own `expires_at`.** Nothing yet
    expires an `awaiting_payment` payment whose instrument has lapsed.
