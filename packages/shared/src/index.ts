@@ -27,3 +27,18 @@ export {
   InvalidAllocationError,
   InvalidMinorUnitAmountError,
 } from './money/money-errors.js';
+export type {
+  ParsedPublicIdentifier,
+  PublicIdentifierKind,
+  PublicIdentifierPrefix,
+} from './identifiers/public-identifier.js';
+export {
+  assertPublicIdentifier,
+  generatePublicIdentifier,
+  InvalidPublicIdentifierError,
+  isPublicIdentifier,
+  parsePublicIdentifier,
+  PUBLIC_IDENTIFIER_BODY_LENGTH,
+  PUBLIC_IDENTIFIER_ENTROPY_BITS,
+  PUBLIC_IDENTIFIER_PREFIXES,
+} from './identifiers/public-identifier.js';
