@@ -44,6 +44,44 @@ function commandFor(overrides: Partial<CreatePaymentCommand> = {}): CreatePaymen
   };
 }
 
+/**
+ * Finishes a claimed payment, exactly as the use case does after the provider
+ * answers.
+ *
+ * A claim alone has no response yet, so the record stays in flight until this
+ * runs. Tests that want a replay must therefore complete the cycle first, which
+ * is also what makes the replayed response worth asserting: it is the one the
+ * caller received, not a placeholder.
+ */
+async function completeCycle(
+  command: CreatePaymentCommand,
+  paymentId: string,
+  outcome: { readonly toStatus: string; readonly responseStatus: number; readonly body: unknown },
+): Promise<void> {
+  const attemptId = await fixture.repository.openAttempt({
+    organizationId: command.organizationId,
+    paymentId,
+    attemptNumber: 1,
+    providerCode: 'appmax',
+  });
+
+  await fixture.repository.applyProviderOutcome({
+    organizationId: command.organizationId,
+    paymentId,
+    attemptId,
+    outcomeClass: 'success',
+    providerReference: publicIdentifierFor('ref'),
+    failureReason: undefined,
+    toStatus: outcome.toStatus,
+    trigger: 'INSTRUMENT_ISSUED',
+    evidenceClass: 'authenticated_provider_read',
+    idempotencyKey: command.idempotencyKey,
+    environment: command.environment,
+    responseStatus: outcome.responseStatus,
+    responseBody: outcome.body,
+  });
+}
+
 async function countPaymentsWithReference(reference: string): Promise<number> {
   const result = await fixture.ownerPool.query<{ count: string }>(
     'SELECT count(*) AS count FROM payments WHERE merchant_reference = $1',
@@ -62,6 +100,21 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  // The append-only trigger refuses this, which is the point of it. Test teardown
+  // suspends it deliberately rather than the trigger being weakened for everyone.
+  await fixture.ownerPool.query(
+    'ALTER TABLE payment_status_transitions DISABLE TRIGGER payment_status_transitions_append_only',
+  );
+  await fixture.ownerPool.query(
+    'DELETE FROM payment_status_transitions WHERE organization_id = ANY($1)',
+    [organizationIds],
+  );
+  await fixture.ownerPool.query(
+    'ALTER TABLE payment_status_transitions ENABLE TRIGGER payment_status_transitions_append_only',
+  );
+  await fixture.ownerPool.query('DELETE FROM payment_attempts WHERE organization_id = ANY($1)', [
+    organizationIds,
+  ]);
   await fixture.ownerPool.query('DELETE FROM idempotency_records WHERE organization_id = ANY($1)', [
     organizationIds,
   ]);
@@ -72,6 +125,26 @@ afterAll(async () => {
   await fixture.ownerPool.end();
   await fixture.applicationPool.end();
 });
+
+async function readRecord(command: CreatePaymentCommand): Promise<
+  | {
+      readonly state: string;
+      readonly response_status: number | null;
+      readonly payment_id: string | null;
+    }
+  | undefined
+> {
+  const result = await fixture.ownerPool.query<{
+    state: string;
+    response_status: number | null;
+    payment_id: string | null;
+  }>(
+    `SELECT state, response_status, payment_id FROM idempotency_records
+      WHERE organization_id = $1 AND idempotency_key = $2`,
+    [command.organizationId, command.idempotencyKey],
+  );
+  return result.rows[0];
+}
 
 describe('creating a payment once', () => {
   it('creates it and returns a public identifier', async () => {
@@ -84,44 +157,88 @@ describe('creating a payment once', () => {
     expect(result.publicId).toMatch(/^pay_[0-9a-hjkmnp-tv-z]{26}$/);
   });
 
-  it('records the idempotency key as completed alongside the payment', async () => {
+  it('holds the key in flight until the provider has answered', async () => {
+    // Completing it at claim time would mean inventing a response, and a replay
+    // would then hand the caller a status and body they never received.
     const command = commandFor();
     await fixture.repository.createPayment(command);
 
-    const record = await fixture.ownerPool.query<{
-      state: string;
-      response_status: number;
-      payment_id: string | null;
-    }>(
-      `SELECT state, response_status, payment_id FROM idempotency_records
-        WHERE organization_id = $1 AND idempotency_key = $2`,
-      [command.organizationId, command.idempotencyKey],
-    );
+    const record = await readRecord(command);
+    expect(record?.state).toBe('in_flight');
+    expect(record?.response_status).toBeNull();
+    // The payment is attached immediately, so a crash before the provider answers
+    // still leaves the claim pointing at the row it created.
+    expect(record?.payment_id).not.toBeNull();
+  });
 
-    expect(record.rows[0]?.state).toBe('completed');
-    expect(record.rows[0]?.response_status).toBe(201);
-    expect(record.rows[0]?.payment_id).not.toBeNull();
+  it('completes the key with the response the caller received', async () => {
+    const command = commandFor();
+    const created = await fixture.repository.createPayment(command);
+    if (created.kind !== 'created') {
+      throw new Error('expected the payment to be created');
+    }
+
+    await completeCycle(command, created.paymentId, {
+      toStatus: 'awaiting_payment',
+      responseStatus: 201,
+      body: { id: created.publicId, status: 'awaiting_payment' },
+    });
+
+    const record = await readRecord(command);
+    expect(record?.state).toBe('completed');
+    expect(record?.response_status).toBe(201);
+    expect(record?.payment_id).toBe(created.paymentId);
   });
 });
 
 describe('repeating the same key', () => {
+  it('refuses a second attempt while the first is still in flight', async () => {
+    // Not a replay: there is nothing to replay yet. Answering with a fabricated
+    // success here is how a caller ends up believing in a payment that does not
+    // exist, so the honest answer is "still running, retry".
+    const command = commandFor();
+    await fixture.repository.createPayment(command);
+    const second = await fixture.repository.createPayment(command);
+
+    expect(second.kind).toBe('in_flight');
+    expect(await countPaymentsWithReference(command.merchantReference)).toBe(1);
+  });
+
   it('replays the original response instead of creating a second payment', async () => {
     const command = commandFor();
     const first = await fixture.repository.createPayment(command);
+    if (first.kind !== 'created') {
+      throw new Error('expected the payment to be created');
+    }
+    await completeCycle(command, first.paymentId, {
+      toStatus: 'awaiting_payment',
+      responseStatus: 201,
+      body: { id: first.publicId, status: 'awaiting_payment' },
+    });
+
     const second = await fixture.repository.createPayment(command);
 
     expect(second.kind).toBe('replayed');
-    if (second.kind !== 'replayed' || first.kind !== 'created') {
+    if (second.kind !== 'replayed') {
       throw new Error('expected a create followed by a replay');
     }
     expect(second.responseStatus).toBe(201);
-    expect(second.responseBody).toEqual({ id: first.publicId, status: 'pending' });
+    // The response the provider outcome produced, not one invented at claim time.
+    expect(second.responseBody).toEqual({ id: first.publicId, status: 'awaiting_payment' });
     expect(await countPaymentsWithReference(command.merchantReference)).toBe(1);
   });
 
   it('replays identically however many times it is retried', async () => {
     const command = commandFor();
-    await fixture.repository.createPayment(command);
+    const first = await fixture.repository.createPayment(command);
+    if (first.kind !== 'created') {
+      throw new Error('expected the payment to be created');
+    }
+    await completeCycle(command, first.paymentId, {
+      toStatus: 'awaiting_payment',
+      responseStatus: 201,
+      body: { id: first.publicId, status: 'awaiting_payment' },
+    });
 
     const replays = await Promise.all(
       Array.from({ length: 10 }, async () => fixture.repository.createPayment(command)),

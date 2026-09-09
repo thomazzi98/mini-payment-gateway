@@ -20,6 +20,11 @@ export default defineConfig({
           include: ['src/**/*.test.ts'],
           exclude: ['src/**/*.integration.test.ts'],
           environment: 'node',
+          // These tests do milliseconds of work; the headroom is for module
+          // transform on a cold, loaded machine. The default 5s failed here only
+          // when a container build was saturating every core, which is a false
+          // failure and exactly what a CI runner looks like under load.
+          testTimeout: 15_000,
         },
       },
       {

@@ -199,12 +199,76 @@ export class PaymentCreationRepository {
   }
 
   /**
-   * Opens an attempt before the provider is called.
+   * Moves a payment and writes the transition that justifies the move.
    *
-   * Written first, and committed, so that a crash during the network call leaves
-   * evidence that something was tried. An attempt that exists with no outcome is
-   * exactly the signal reconciliation needs; one that was never written would
-   * leave a payment that had unknowingly been sent to a provider.
+   * Both happen here because the database refuses them apart: a deferred
+   * constraint trigger rejects any status change that commits without a matching,
+   * legal, evidence-backed transition row carrying the same sequence number.
+   *
+   * The caller supplies the transaction, so a move always commits with whatever
+   * else made it true.
+   */
+  private async moveStatus(
+    client: PoolClient,
+    move: {
+      readonly paymentId: string;
+      readonly organizationId: string;
+      readonly toStatus: string;
+      readonly trigger: string;
+      readonly evidenceClass: string;
+      readonly attemptId: string | null;
+      readonly reason: string | null;
+    },
+  ): Promise<void> {
+    // FOR UPDATE so two concurrent movers cannot read the same sequence number
+    // and write two transitions claiming to be the same step.
+    const current = await client.query<{ status: string; status_sequence: string }>(
+      'SELECT status, status_sequence FROM payments WHERE id = $1 FOR UPDATE',
+      [move.paymentId],
+    );
+    const currentRow = current.rows[0];
+    if (currentRow === undefined) {
+      throw new Error('the payment disappeared while an attempt was in flight');
+    }
+    const nextSequence = Number(currentRow.status_sequence) + 1;
+
+    await client.query(
+      `INSERT INTO payment_status_transitions
+         (payment_id, organization_id, sequence_number, from_status, to_status,
+          trigger_name, evidence_class, payment_attempt_id, captured_amount_after, reason)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9)`,
+      [
+        move.paymentId,
+        move.organizationId,
+        nextSequence,
+        currentRow.status,
+        move.toStatus,
+        move.trigger,
+        move.evidenceClass,
+        move.attemptId,
+        move.reason,
+      ],
+    );
+
+    await client.query('UPDATE payments SET status = $2, status_sequence = $3 WHERE id = $1', [
+      move.paymentId,
+      move.toStatus,
+      nextSequence,
+    ]);
+  }
+
+  /**
+   * Opens an attempt before the provider is called, and records that a request is
+   * being sent.
+   *
+   * Both are committed before the network call. A crash mid-flight therefore
+   * leaves a payment in `processing` carrying an attempt with no outcome, which is
+   * exactly the signal reconciliation needs. Had nothing been written, a payment
+   * that had unknowingly reached a provider would look untouched.
+   *
+   * The move to `processing` is also what makes the outcome legal: the transition
+   * table permits `awaiting_payment`, `failed` and `unknown` only from
+   * `processing`, so an attempt that skipped this step could not be closed.
    */
   public async openAttempt(command: RecordAttemptCommand): Promise<string> {
     const client = await this.pool.connect();
@@ -228,12 +292,22 @@ export class PaymentCreationRepository {
           command.providerCode,
         ],
       );
-
-      await client.query('COMMIT');
       const attemptId = inserted.rows[0]?.id;
       if (attemptId === undefined) {
         throw new Error('opening a payment attempt returned no row');
       }
+
+      await this.moveStatus(client, {
+        paymentId: command.paymentId,
+        organizationId: command.organizationId,
+        toStatus: 'processing',
+        trigger: 'PROVIDER_REQUEST_SENT',
+        evidenceClass: 'internal',
+        attemptId,
+        reason: null,
+      });
+
+      await client.query('COMMIT');
       return attemptId;
     } catch (error) {
       await client.query('ROLLBACK');
@@ -260,6 +334,10 @@ export class PaymentCreationRepository {
         command.organizationId,
       ]);
 
+      // The provider reference is recorded on the attempt, never on the payment.
+      // A payment may be attempted against several providers, so a single column
+      // on the payment could only ever hold one of them and would silently become
+      // whichever was written last.
       await client.query(
         `UPDATE payment_attempts
             SET outcome_class = $2, provider_reference = $3, failure_reason = $4,
@@ -273,39 +351,15 @@ export class PaymentCreationRepository {
         ],
       );
 
-      const current = await client.query<{ status: string; status_sequence: string }>(
-        'SELECT status, status_sequence FROM payments WHERE id = $1 FOR UPDATE',
-        [command.paymentId],
-      );
-      const fromStatus = current.rows[0]?.status;
-      if (fromStatus === undefined) {
-        throw new Error('the payment disappeared while its attempt was in flight');
-      }
-      const nextSequence = Number(current.rows[0]?.status_sequence ?? 0) + 1;
-
-      await client.query(
-        `INSERT INTO payment_status_transitions
-           (payment_id, organization_id, sequence_number, from_status, to_status,
-            trigger_name, evidence_class, payment_attempt_id, captured_amount_after, reason)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9)`,
-        [
-          command.paymentId,
-          command.organizationId,
-          nextSequence,
-          fromStatus,
-          command.toStatus,
-          command.trigger,
-          command.evidenceClass,
-          command.attemptId,
-          command.failureReason ?? null,
-        ],
-      );
-
-      await client.query('UPDATE payments SET status = $2, status_sequence = $3 WHERE id = $1', [
-        command.paymentId,
-        command.toStatus,
-        nextSequence,
-      ]);
+      await this.moveStatus(client, {
+        paymentId: command.paymentId,
+        organizationId: command.organizationId,
+        toStatus: command.toStatus,
+        trigger: command.trigger,
+        evidenceClass: command.evidenceClass,
+        attemptId: command.attemptId,
+        reason: command.failureReason ?? null,
+      });
 
       await client.query(
         `UPDATE idempotency_records
