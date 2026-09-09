@@ -5,7 +5,6 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 COPY packages/shared/package.json ./packages/shared/
 COPY apps/api/package.json ./apps/api/
-COPY apps/provider-simulator/package.json ./apps/provider-simulator/
 # --ignore-scripts: the prepare hook installs git hooks for local development and has
 # no place in an image. It also stops any dependency's postinstall script from running
 # arbitrary code during the build.
@@ -13,10 +12,18 @@ RUN npm ci --no-audit --no-fund --ignore-scripts
 
 FROM dependencies AS build
 WORKDIR /app
-COPY tsconfig.base.json tsconfig.json ./
+COPY tsconfig.base.json tsconfig.json vitest.config.ts ./
 COPY packages ./packages
 COPY apps ./apps
+COPY scripts ./scripts
 RUN npm run build
+
+# Integration tests run inside the compose network, because the datastores sit on
+# an internal network with no published port. This stage keeps devDependencies and
+# the sources, which the runtime image deliberately does not.
+FROM build AS test
+WORKDIR /app
+CMD ["npx", "vitest", "run", "--project", "integration"]
 
 FROM node:24-alpine AS runtime
 WORKDIR /app
@@ -25,7 +32,6 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 COPY packages/shared/package.json ./packages/shared/
 COPY apps/api/package.json ./apps/api/
-COPY apps/provider-simulator/package.json ./apps/provider-simulator/
 RUN npm ci --omit=dev --no-audit --no-fund --ignore-scripts && npm cache clean --force
 
 COPY --from=build /app/packages/shared/dist ./packages/shared/dist

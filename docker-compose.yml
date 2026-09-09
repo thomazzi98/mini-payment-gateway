@@ -61,6 +61,29 @@ services:
     networks: [internal]
     restart: 'no'
 
+  roles:
+    image: postgres:18.4-bookworm
+    # Runs after every migration, because a new table needs the same grants and
+    # default privileges only cover objects created after they were set.
+    command:
+      - psql
+      - postgres://${POSTGRES_USER:-payment_gateway_owner}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-payment_gateway}
+      - -v
+      - ON_ERROR_STOP=1
+      - -v
+      - application_password=${DATABASE_APPLICATION_PASSWORD:?DATABASE_APPLICATION_PASSWORD is required}
+      - -v
+      - database_name=${POSTGRES_DB:-payment_gateway}
+      - -f
+      - /roles.sql
+    volumes:
+      - ./docker/roles.sql:/roles.sql:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [internal]
+    restart: 'no'
+
   api:
     build:
       context: .
@@ -70,12 +93,12 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       HTTP_HOST: 0.0.0.0
       HTTP_PORT: 3000
-      DATABASE_URL: postgres://${POSTGRES_USER:-payment_gateway_owner}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-payment_gateway}
+      DATABASE_URL: postgres://payment_gateway_application:${DATABASE_APPLICATION_PASSWORD:?DATABASE_APPLICATION_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-payment_gateway}
       REDIS_URL: redis://redis:6379
     ports:
       - '127.0.0.1:${API_HOST_PORT:-4010}:3000'
     depends_on:
-      migrate:
+      roles:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
@@ -93,6 +116,26 @@ services:
       start_period: 15s
     networks: [internal, outbound]
     restart: unless-stopped
+
+  test:
+    profiles: [test]
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+      target: test
+    environment:
+      NODE_ENV: test
+      LOG_LEVEL: warn
+      # The role under test: owns nothing, bypasses nothing.
+      DATABASE_URL: postgres://payment_gateway_application:${DATABASE_APPLICATION_PASSWORD:?DATABASE_APPLICATION_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-payment_gateway}
+      # Used only to seed fixtures and inspect results, never to assert isolation.
+      OWNER_DATABASE_URL: postgres://${POSTGRES_USER:-payment_gateway_owner}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-payment_gateway}
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      roles:
+        condition: service_completed_successfully
+    networks: [internal]
+    restart: 'no'
 
 networks:
   # Datastores live here and are unreachable from anything that talks to the

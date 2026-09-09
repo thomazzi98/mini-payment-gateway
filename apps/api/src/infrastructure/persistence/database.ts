@@ -40,6 +40,27 @@ export class Database {
     }
   }
 
+  /**
+   * The only way tenant data is read or written.
+   *
+   * set_config with is_local = true scopes the setting to this transaction, so it
+   * is discarded on commit or rollback and cannot survive on a pooled connection
+   * into somebody else's request. Row level security then does the rest: a query
+   * that forgets its filter returns nothing rather than another merchant's rows.
+   */
+  public async withOrganizationScope<Result>(
+    organizationId: string,
+    work: (client: PoolClient) => Promise<Result>,
+  ): Promise<Result> {
+    return this.withTransaction(async (client) => {
+      await client.query('SELECT set_config($1, $2, true)', [
+        'app.organization_id',
+        organizationId,
+      ]);
+      return work(client);
+    });
+  }
+
   public async checkHealth(): Promise<DatabaseHealth> {
     const startedAt = process.hrtime.bigint();
     try {
