@@ -163,6 +163,22 @@ describe('scheduling follows status rather than being remembered', () => {
     expect(payment.reconciliation_attempts).toBe(0);
   });
 
+  it('schedules a payment that is born uncertain, not only one that becomes so', async () => {
+    // Nothing inserts a payment as unknown today. The trigger covers it anyway,
+    // because "a payment is always inserted as pending" is exactly the kind of
+    // assumption this design exists to stop depending on.
+    const inserted = await fixture.ownerPool.query<{ reconciliation_due_at: Date | null }>(
+      `INSERT INTO payments
+         (public_id, organization_id, environment, merchant_reference, payment_method,
+          currency, expected_amount_minor, status)
+       VALUES ($1, $2, 'SANDBOX', $3, 'pix', 'BRL', 10000, 'unknown')
+       RETURNING reconciliation_due_at`,
+      [publicIdentifierFor('pay'), fixture.merchant.id, `reference-${publicIdentifierFor('r')}`],
+    );
+
+    expect(inserted.rows[0]?.reconciliation_due_at).not.toBeNull();
+  });
+
   it('unschedules it the moment it stops being uncertain', async () => {
     const { paymentId, attemptId } = await uncertainPayment();
 
