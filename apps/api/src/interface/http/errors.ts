@@ -27,6 +27,7 @@ export type ErrorCode =
   | 'amount_exceeds_limit'
   | 'idempotency_key_reuse'
   | 'idempotency_key_in_flight'
+  | 'idempotency_key_stranded'
   | 'duplicate_merchant_reference'
   | 'no_provider_available'
   | 'not_found'

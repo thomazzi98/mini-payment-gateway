@@ -76,6 +76,17 @@ export type IdempotencyDecision =
   | { readonly kind: 'proceed' }
   | { readonly kind: 'replay'; readonly responseStatus: number; readonly responseBody: unknown }
   | { readonly kind: 'in_flight' }
+  /**
+   * Claimed, never completed, and now past its expiry.
+   *
+   * Distinguished from `in_flight` because the answers differ: one means "the
+   * first request is still running, retry shortly", and telling a merchant that
+   * forever is a lie they cannot act on. Deliberately NOT a licence to claim the
+   * key again: the payment it created may have reached a provider and may be
+   * payable, and issuing a second one is how a customer ends up with two codes.
+   * It resolves when that payment is reconciled.
+   */
+  | { readonly kind: 'stranded' }
   | { readonly kind: 'conflict' };
 
 export interface ExistingIdempotencyRecord {
@@ -84,12 +95,14 @@ export interface ExistingIdempotencyRecord {
   readonly state: 'in_flight' | 'completed';
   readonly responseStatus: number | null;
   readonly responseBody: unknown;
+  readonly expiresAt: Date;
 }
 
 export function decideForExistingRecord(
   existing: ExistingIdempotencyRecord,
   presentedFingerprint: Buffer,
   presentedPath: string,
+  now: Date,
 ): IdempotencyDecision {
   const isSameRequest =
     existing.requestPath === presentedPath &&
@@ -100,7 +113,7 @@ export function decideForExistingRecord(
     return { kind: 'conflict' };
   }
   if (existing.state === 'in_flight') {
-    return { kind: 'in_flight' };
+    return now < existing.expiresAt ? { kind: 'in_flight' } : { kind: 'stranded' };
   }
   if (existing.responseStatus === null) {
     // A completed record must carry its response; the schema enforces that, so

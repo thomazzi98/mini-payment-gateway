@@ -7,6 +7,7 @@ import type {
   CreatePaymentOutcome,
 } from '../../../application/create-payment.use-case.js';
 import { missingScopes } from '../../../domain/api-key/api-key.js';
+import { IDEMPOTENCY_KEY_MAXIMUM_LENGTH } from '../../../domain/idempotency/idempotency.js';
 import type { ApiKeyPrincipal } from '../../../domain/api-key/api-key.js';
 import { apiError, authenticationRefused } from '../errors.js';
 import type { ApiError } from '../errors.js';
@@ -21,12 +22,6 @@ import type { ApplicationServer } from '../server-types.js';
  */
 
 const BEARER_PREFIX = 'Bearer ';
-
-/**
- * Matches the idempotency_records column, so the edge refuses what the database
- * would refuse rather than letting it become a 500.
- */
-const MAXIMUM_IDEMPOTENCY_KEY_LENGTH = 255;
 
 /**
  * Amounts arrive as integer minor units and are refused otherwise.
@@ -110,16 +105,17 @@ export function registerPaymentRoutes(
         }).body,
       );
     }
-    // The column is bounded at 255. Unchecked, a longer key reached the database
-    // and came back as a constraint violation, which the caller saw as a 500 for
-    // what is plainly their own input.
-    if (idempotencyKey.trim().length > MAXIMUM_IDEMPOTENCY_KEY_LENGTH) {
+    // The column is bounded. Unchecked, a longer key reached the database and came
+    // back as a constraint violation, which the caller saw as a 500 for what is
+    // plainly their own input. The bound comes from the domain rather than being
+    // restated here, so the two cannot disagree.
+    if (idempotencyKey.trim().length > IDEMPOTENCY_KEY_MAXIMUM_LENGTH) {
       return reply.code(400).send(
         apiError({
           httpStatus: 400,
           type: 'invalid_request_error',
           code: 'invalid_request',
-          message: `An Idempotency-Key may be at most ${MAXIMUM_IDEMPOTENCY_KEY_LENGTH} characters.`,
+          message: `An Idempotency-Key may be at most ${IDEMPOTENCY_KEY_MAXIMUM_LENGTH} characters.`,
           requestId,
           param: 'Idempotency-Key',
         }).body,
@@ -237,6 +233,19 @@ function errorFor(outcome: CreatePaymentOutcome, requestId: string): ApiError {
       message: `This amount exceeds the limit configured for this account, which is ${outcome.maximumAmountMinor} minor units.`,
       requestId,
       param: 'amount',
+    });
+  }
+  if (outcome.kind === 'stranded') {
+    return apiError({
+      httpStatus: 409,
+      type: 'conflict_error',
+      code: 'idempotency_key_stranded',
+      message:
+        'A payment was created for this key but never finished, so its outcome is not yet known. Retrying will not help; it is being reconciled. Use a new idempotency key only if you are certain no payment was presented to the customer.',
+      requestId,
+      // Not retryable, unlike in_flight. Saying "retry shortly" forever is a lie
+      // the merchant cannot act on.
+      retryable: false,
     });
   }
   if (outcome.kind === 'duplicate_merchant_reference') {

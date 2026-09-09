@@ -12,6 +12,10 @@ import type { ExistingIdempotencyRecord } from './idempotency.js';
 const PATH = '/v1/payments';
 const BODY = { amount: 10_000, currency: 'BRL', reference: 'order-1' };
 
+const NOW = new Date('2026-09-09T12:00:00.000Z');
+const STILL_VALID = new Date('2026-09-10T12:00:00.000Z');
+const ALREADY_EXPIRED = new Date('2026-09-08T12:00:00.000Z');
+
 function recordFor(overrides: Partial<ExistingIdempotencyRecord> = {}): ExistingIdempotencyRecord {
   return {
     requestFingerprint: fingerprintRequest(PATH, BODY),
@@ -19,6 +23,7 @@ function recordFor(overrides: Partial<ExistingIdempotencyRecord> = {}): Existing
     state: 'completed',
     responseStatus: 201,
     responseBody: { id: 'pay_0123456789abcdefghjkmnpqrs' },
+    expiresAt: STILL_VALID,
     ...overrides,
   };
 }
@@ -101,7 +106,12 @@ describe('fingerprinting a request', () => {
 
 describe('deciding what a repeated key means', () => {
   it('replays the stored response for an identical completed request', () => {
-    const decision = decideForExistingRecord(recordFor(), fingerprintRequest(PATH, BODY), PATH);
+    const decision = decideForExistingRecord(
+      recordFor(),
+      fingerprintRequest(PATH, BODY),
+      PATH,
+      NOW,
+    );
 
     expect(decision).toEqual({
       kind: 'replay',
@@ -117,6 +127,7 @@ describe('deciding what a repeated key means', () => {
       recordFor(),
       fingerprintRequest(PATH, { ...BODY, amount: 99_999 }),
       PATH,
+      NOW,
     );
 
     expect(decision).toEqual({ kind: 'conflict' });
@@ -127,6 +138,7 @@ describe('deciding what a repeated key means', () => {
       recordFor(),
       fingerprintRequest('/v1/refunds', BODY),
       '/v1/refunds',
+      NOW,
     );
 
     expect(decision).toEqual({ kind: 'conflict' });
@@ -137,6 +149,7 @@ describe('deciding what a repeated key means', () => {
       recordFor({ state: 'in_flight', responseStatus: null, responseBody: null }),
       fingerprintRequest(PATH, BODY),
       PATH,
+      NOW,
     );
 
     expect(decision).toEqual({ kind: 'in_flight' });
@@ -147,6 +160,7 @@ describe('deciding what a repeated key means', () => {
       recordFor({ state: 'in_flight', responseStatus: null, responseBody: null }),
       fingerprintRequest(PATH, { ...BODY, amount: 1 }),
       PATH,
+      NOW,
     );
 
     expect(decision).toEqual({ kind: 'conflict' });
@@ -159,6 +173,74 @@ describe('deciding what a repeated key means', () => {
       recordFor({ responseStatus: null }),
       fingerprintRequest(PATH, BODY),
       PATH,
+      NOW,
+    );
+
+    expect(decision).toEqual({ kind: 'conflict' });
+  });
+});
+
+describe('a claim that was never completed', () => {
+  it('is in flight while it is still within its expiry', () => {
+    const decision = decideForExistingRecord(
+      recordFor({ state: 'in_flight', responseStatus: null, responseBody: null }),
+      fingerprintRequest(PATH, BODY),
+      PATH,
+      NOW,
+    );
+
+    expect(decision).toEqual({ kind: 'in_flight' });
+  });
+
+  it('is stranded once its expiry has passed', () => {
+    // The first request died without finishing. Answering "still being
+    // processed, retry shortly" from here on is a lie the merchant cannot act on.
+    const decision = decideForExistingRecord(
+      recordFor({
+        state: 'in_flight',
+        responseStatus: null,
+        responseBody: null,
+        expiresAt: ALREADY_EXPIRED,
+      }),
+      fingerprintRequest(PATH, BODY),
+      PATH,
+      NOW,
+    );
+
+    expect(decision).toEqual({ kind: 'stranded' });
+  });
+
+  it('does not hand the key back to be claimed again', () => {
+    // Deliberately not 'proceed'. The payment that claim created may have reached
+    // a provider and may be payable; issuing a second one is how a customer ends
+    // up holding two codes for one order.
+    const decision = decideForExistingRecord(
+      recordFor({
+        state: 'in_flight',
+        responseStatus: null,
+        responseBody: null,
+        expiresAt: ALREADY_EXPIRED,
+      }),
+      fingerprintRequest(PATH, BODY),
+      PATH,
+      NOW,
+    );
+
+    expect(decision.kind).not.toBe('proceed');
+    expect(decision.kind).not.toBe('replay');
+  });
+
+  it('still reports a conflict for a different body, expired or not', () => {
+    const decision = decideForExistingRecord(
+      recordFor({
+        state: 'in_flight',
+        responseStatus: null,
+        responseBody: null,
+        expiresAt: ALREADY_EXPIRED,
+      }),
+      fingerprintRequest(PATH, { ...BODY, amount: 99_999 }),
+      PATH,
+      NOW,
     );
 
     expect(decision).toEqual({ kind: 'conflict' });

@@ -44,6 +44,7 @@ export interface PaymentCreationStore {
     | { readonly kind: 'in_flight' }
     | { readonly kind: 'conflict' }
     | { readonly kind: 'duplicate_merchant_reference' }
+    | { readonly kind: 'stranded' }
     | { readonly kind: 'amount_exceeds_limit'; readonly maximumAmountMinor: bigint }
   >;
 
@@ -167,6 +168,7 @@ export type CreatePaymentOutcome =
   | { readonly kind: 'in_flight' }
   | { readonly kind: 'idempotency_conflict' }
   | { readonly kind: 'duplicate_merchant_reference' }
+  | { readonly kind: 'stranded' }
   | { readonly kind: 'amount_exceeds_limit'; readonly maximumAmountMinor: bigint }
   | {
       readonly kind: 'no_provider';
@@ -280,6 +282,9 @@ export async function createPayment(
   }
   if (claimed.kind === 'duplicate_merchant_reference') {
     return { kind: 'duplicate_merchant_reference' };
+  }
+  if (claimed.kind === 'stranded') {
+    return { kind: 'stranded' };
   }
   if (claimed.kind === 'amount_exceeds_limit') {
     return { kind: 'amount_exceeds_limit', maximumAmountMinor: claimed.maximumAmountMinor };

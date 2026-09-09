@@ -27,6 +27,7 @@ export type CreatePaymentResult =
   | { readonly kind: 'in_flight' }
   | { readonly kind: 'conflict' }
   | { readonly kind: 'duplicate_merchant_reference' }
+  | { readonly kind: 'stranded' }
   | { readonly kind: 'amount_exceeds_limit'; readonly maximumAmountMinor: bigint };
 
 export interface RecordAttemptCommand {
@@ -80,6 +81,7 @@ interface ExistingRecordRow {
   readonly state: 'in_flight' | 'completed';
   readonly response_status: number | null;
   readonly response_body: unknown;
+  readonly expires_at: Date;
 }
 
 const UNIQUE_VIOLATION = '23505';
@@ -198,7 +200,8 @@ export class PaymentCreationRepository {
     fingerprint: Buffer,
   ): Promise<CreatePaymentResult> {
     const existing = await client.query<ExistingRecordRow>(
-      `SELECT request_fingerprint, request_path, state, response_status, response_body
+      `SELECT request_fingerprint, request_path, state, response_status, response_body,
+              expires_at
          FROM idempotency_records
         WHERE organization_id = $1 AND environment = $2 AND idempotency_key = $3`,
       [command.organizationId, command.environment, command.idempotencyKey],
@@ -218,9 +221,11 @@ export class PaymentCreationRepository {
         state: row.state,
         responseStatus: row.response_status,
         responseBody: row.response_body,
+        expiresAt: row.expires_at,
       },
       fingerprint,
       command.requestPath,
+      new Date(),
     );
 
     if (decision.kind === 'replay') {
@@ -232,6 +237,9 @@ export class PaymentCreationRepository {
     }
     if (decision.kind === 'conflict') {
       return { kind: 'conflict' };
+    }
+    if (decision.kind === 'stranded') {
+      return { kind: 'stranded' };
     }
     return { kind: 'in_flight' };
   }
