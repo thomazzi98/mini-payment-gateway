@@ -43,10 +43,16 @@ function registerProviders(environment: Environment, logger: Logger): Registered
     return [];
   }
 
-  // SANDBOX until an organization is production-enabled. The transport keys its
-  // base URLs off this, and refuses any override for production.
+  /**
+   * Credentials belong to exactly one Appmax environment, so the registration
+   * says which. A payment in the other environment then finds no candidate and is
+   * refused, rather than being handed a code from the wrong world: a sandbox code
+   * served to a production payment cannot be paid, and the merchant would be told
+   * their customer had something to pay when they did not.
+   */
+  const appmaxEnvironment = environment.APPMAX_ENVIRONMENT;
   const transport = new UndiciAppmaxTransport(
-    'SANDBOX',
+    appmaxEnvironment,
     {
       clientId: environment.APPMAX_CLIENT_ID,
       clientSecret: new Secret(environment.APPMAX_CLIENT_SECRET),
@@ -55,9 +61,15 @@ function registerProviders(environment: Environment, logger: Logger): Registered
   );
   const tokens = new AppmaxTokenCache(() => transport.fetchToken());
 
+  logger.info(
+    { provider: 'appmax', environment: appmaxEnvironment },
+    'appmax registered for pix in one environment',
+  );
+
   return [
     {
       descriptor: APPMAX_DESCRIPTOR,
+      environment: appmaxEnvironment,
       pix: new AppmaxPixProvider(transport, tokens),
       priority: 1,
     },

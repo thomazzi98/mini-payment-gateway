@@ -34,6 +34,10 @@ const environmentSchema = baseEnvironmentSchema.extend({
   // partway through a call that was never going to work.
   APPMAX_CLIENT_ID: z.string().default(''),
   APPMAX_CLIENT_SECRET: z.string().default(''),
+  // Which Appmax the credentials above belong to. Payments in the other
+  // environment find no provider and are refused, rather than being served a code
+  // from the wrong world.
+  APPMAX_ENVIRONMENT: z.enum(['SANDBOX', 'PRODUCTION']).default('SANDBOX'),
 });
 
 export type Environment = z.infer<typeof environmentSchema>;

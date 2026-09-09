@@ -280,10 +280,16 @@ export async function createPayment(
     return { kind: 'duplicate_merchant_reference' };
   }
 
-  const candidates = dependencies.providers.candidatesForPix('pix', input.currency);
+  // The environment comes from the payment, which took it from the API key. A
+  // production payment is never served by a sandbox registration.
+  const candidates = dependencies.providers.candidatesForPix(
+    'pix',
+    input.currency,
+    input.environment,
+  );
   if (candidates.length === 0) {
     return await abandonPayment(input, dependencies, claimed.publicId, claimed.paymentId, {
-      reason: `No configured provider can serve pix in ${input.currency}.`,
+      reason: `No configured provider can serve pix in ${input.currency} for ${input.environment}.`,
       failureCode: 'no_provider_available',
       responseStatus: RESPONSE_STATUS.no_provider,
       kind: 'no_provider',

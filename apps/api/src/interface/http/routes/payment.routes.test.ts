@@ -121,7 +121,16 @@ function buildHarness(options: {
   const providers =
     options.withoutProvider === true
       ? new ProviderRegistry([])
-      : new ProviderRegistry([{ descriptor: provider.descriptor, pix: provider, priority: 1 }]);
+      : new ProviderRegistry([
+          {
+            descriptor: provider.descriptor,
+            // Matches the key environment the harness issues, so selection is
+            // exercised rather than skipped.
+            environment: options.environment ?? 'SANDBOX',
+            pix: provider,
+            priority: 1,
+          },
+        ]);
 
   registerPaymentRoutes(server, {
     authentication: {
@@ -292,6 +301,56 @@ describe('request validation', () => {
     });
 
     expect(response.statusCode).toBe(422);
+  });
+
+  it('refuses an over-long idempotency key at the edge', async () => {
+    // The column is bounded at 255. Unchecked, this reached the database and came
+    // back as a constraint violation, which the caller saw as a 500 for their own
+    // input.
+    const harness = buildHarness({});
+    const response = await post(harness, {
+      key: harness.plaintextKey,
+      idempotencyKey: 'k'.repeat(256),
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(errorOf(response).param).toBe('Idempotency-Key');
+  });
+
+  it('accepts an idempotency key exactly at the limit', async () => {
+    const harness = buildHarness({});
+    const response = await post(harness, {
+      key: harness.plaintextKey,
+      idempotencyKey: 'k'.repeat(255),
+    });
+
+    expect(response.statusCode).not.toBe(400);
+  });
+
+  it('refuses a reference that is only whitespace', async () => {
+    // Measured raw, "   " passed here and was refused by the database instead,
+    // which the caller saw as a 500.
+    const harness = buildHarness({});
+    const response = await post(harness, {
+      key: harness.plaintextKey,
+      idempotencyKey: 'key-1',
+      body: { ...VALID_BODY, reference: ' '.repeat(3) },
+    });
+
+    expect(response.statusCode).toBe(422);
+  });
+
+  it('trims the reference before it is stored', async () => {
+    // Otherwise " order-1" and "order-1" each hold their own live payment against
+    // an index meant to permit one.
+    const harness = buildHarness({});
+    await post(harness, {
+      key: harness.plaintextKey,
+      idempotencyKey: 'key-1',
+      body: { ...VALID_BODY, reference: '  order-1  ' },
+    });
+
+    expect(harness.received[0]).toMatchObject({ merchantReference: 'order-1' });
   });
 
   it('carries the request id into every error body', async () => {

@@ -23,6 +23,12 @@ import type { ApplicationServer } from '../server-types.js';
 const BEARER_PREFIX = 'Bearer ';
 
 /**
+ * Matches the idempotency_records column, so the edge refuses what the database
+ * would refuse rather than letting it become a 500.
+ */
+const MAXIMUM_IDEMPOTENCY_KEY_LENGTH = 255;
+
+/**
  * Amounts arrive as integer minor units and are refused otherwise.
  *
  * A caller sending 19.99 believes this API takes major units, and silently
@@ -34,8 +40,12 @@ const paymentRequestSchema = z
     amount: z.int().positive().max(100_000_000),
     currency: z.literal('BRL'),
     paymentMethod: z.literal('pix'),
-    reference: z.string().min(1).max(255),
-    description: z.string().min(1).max(255),
+    // Trimmed before it is measured and before it is stored. Measuring the raw
+    // string let "   " through as a valid reference, which the database then
+    // refused, and let whitespace variants of one reference each hold their own
+    // live payment against the uniqueness index.
+    reference: z.string().trim().min(1).max(255),
+    description: z.string().trim().min(1).max(255),
     customer: z
       .object({
         firstName: z.string().min(1).max(100),
@@ -97,6 +107,21 @@ export function registerPaymentRoutes(
           code: 'missing_idempotency_key',
           message: 'An Idempotency-Key header is required to create a payment.',
           requestId,
+        }).body,
+      );
+    }
+    // The column is bounded at 255. Unchecked, a longer key reached the database
+    // and came back as a constraint violation, which the caller saw as a 500 for
+    // what is plainly their own input.
+    if (idempotencyKey.trim().length > MAXIMUM_IDEMPOTENCY_KEY_LENGTH) {
+      return reply.code(400).send(
+        apiError({
+          httpStatus: 400,
+          type: 'invalid_request_error',
+          code: 'invalid_request',
+          message: `An Idempotency-Key may be at most ${MAXIMUM_IDEMPOTENCY_KEY_LENGTH} characters.`,
+          requestId,
+          param: 'Idempotency-Key',
         }).body,
       );
     }

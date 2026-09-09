@@ -16,6 +16,15 @@ import type { PixPaymentProvider } from './ports/payment-provider.js';
 
 export interface RegisteredProvider {
   readonly descriptor: ProviderDescriptor;
+  /**
+   * The environment this registration's credentials belong to.
+   *
+   * A provider built from sandbox credentials talks to sandbox endpoints and
+   * issues codes nobody can pay. Serving those to a production payment would tell
+   * a merchant their customer had been given something to pay when they had not,
+   * so the environment is matched rather than assumed.
+   */
+  readonly environment: 'SANDBOX' | 'PRODUCTION';
   readonly pix?: PixPaymentProvider;
   /**
   Lower runs first. Ties are broken by registration order, so it is total.
@@ -41,17 +50,26 @@ export class ProviderRegistry {
    * an attempt that ends in a safe failure moves to the next entry, and one that
    * ends unknown may not move at all.
    */
-  public candidatesForPix(method: PaymentMethod, currency: string): PixPaymentProvider[] {
+  public candidatesForPix(
+    method: PaymentMethod,
+    currency: string,
+    environment: 'SANDBOX' | 'PRODUCTION',
+  ): PixPaymentProvider[] {
     return this.registered
       .filter((entry) => entry.pix !== undefined)
+      .filter((entry) => entry.environment === environment)
       .filter((entry) => canServeMethod(entry.descriptor, method, currency))
       .toSorted((left, right) => left.priority - right.priority)
       .map((entry) => entry.pix)
       .filter((provider): provider is PixPaymentProvider => provider !== undefined);
   }
 
-  public selectForPix(method: PaymentMethod, currency: string): ProviderSelection {
-    const candidates = this.candidatesForPix(method, currency);
+  public selectForPix(
+    method: PaymentMethod,
+    currency: string,
+    environment: 'SANDBOX' | 'PRODUCTION',
+  ): ProviderSelection {
+    const candidates = this.candidatesForPix(method, currency, environment);
     const first = candidates[0];
 
     if (first === undefined) {
@@ -59,7 +77,7 @@ export class ProviderRegistry {
       // routing outcome that the payment records as a failure, not a crash.
       return {
         selected: false,
-        reason: `No configured provider can serve ${method} in ${currency}.`,
+        reason: `No configured provider can serve ${method} in ${currency} for ${environment}.`,
       };
     }
     return { selected: true, provider: first };

@@ -109,6 +109,15 @@ export interface BrCodeInspection {
   readonly hasValidChecksum: boolean;
   readonly declaresPixDomain: boolean;
   readonly amountMinor: bigint | undefined;
+  /**
+   * Whether the code carries an amount field at all.
+   *
+   * Separate from `amountMinor` because the two failures are different and both
+   * matter: a code with no amount lets the payer choose what to send, and a code
+   * whose amount cannot be read is one nobody has checked. Collapsing them into a
+   * single undefined is what let both pass unnoticed.
+   */
+  readonly declaresAmount: boolean;
 }
 
 export function inspectBrCode(payload: string): BrCodeInspection {
@@ -116,7 +125,29 @@ export function inspectBrCode(payload: string): BrCodeInspection {
     hasValidChecksum: hasValidBrCodeChecksum(payload),
     declaresPixDomain: payload.toLowerCase().includes(PIX_DOMAIN_MARKER),
     amountMinor: readBrCodeAmountMinor(payload),
+    declaresAmount: hasBrCodeAmountTag(payload),
   };
+}
+
+/**
+ * Whether the amount field is present, regardless of whether its value parses.
+ */
+function hasBrCodeAmountTag(payload: string): boolean {
+  let cursor = 0;
+
+  while (cursor + 4 <= payload.length) {
+    const tag = payload.slice(cursor, cursor + 2);
+    const length = Number(payload.slice(cursor + 2, cursor + 4));
+    if (!Number.isSafeInteger(length) || length < 0) {
+      return false;
+    }
+    if (tag === AMOUNT_TAG) {
+      return true;
+    }
+    cursor = cursor + 4 + length;
+  }
+
+  return false;
 }
 
 /**
@@ -139,7 +170,17 @@ export function assertPresentableBrCode(payload: string, expectedAmountMinor: bi
   if (!inspection.hasValidChecksum) {
     throw new InvalidBrCodeError('The Pix code failed its CRC16 checksum.');
   }
-  if (inspection.amountMinor !== undefined && inspection.amountMinor !== expectedAmountMinor) {
+
+  // A code with no amount is payable for any sum the customer types, and one
+  // whose amount cannot be read is one nobody has checked. Neither is presentable
+  // for a payment whose amount is already agreed.
+  if (!inspection.declaresAmount) {
+    throw new InvalidBrCodeError('The Pix code fixes no amount, so it could be paid for any sum.');
+  }
+  if (inspection.amountMinor === undefined) {
+    throw new InvalidBrCodeError('The Pix code carries an amount that could not be read.');
+  }
+  if (inspection.amountMinor !== expectedAmountMinor) {
     throw new InvalidBrCodeError(
       `The Pix code asks for ${inspection.amountMinor} minor units but the payment expects ${expectedAmountMinor}.`,
     );

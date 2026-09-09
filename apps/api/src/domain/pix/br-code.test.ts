@@ -127,8 +127,26 @@ describe('the gate a code passes before a customer sees it', () => {
     );
   });
 
-  it('accepts a code with no amount, leaving the payer to enter one', () => {
-    expect(() => assertPresentableBrCode(sealed(WITHOUT_AMOUNT), 5000n)).not.toThrow();
+  it('refuses a code that fixes no amount', () => {
+    // This previously passed, on the reasoning that an amount-free code lets the
+    // payer enter one. That is a real Pix flow, but not this one: every payment
+    // here is created with an agreed amount, so a code the customer can satisfy
+    // with any sum produces an underpayment nothing can reconcile to paid.
+    expect(() => assertPresentableBrCode(sealed(WITHOUT_AMOUNT), 5000n)).toThrow(/fixes no amount/);
+  });
+
+  it('refuses a code whose amount cannot be read', () => {
+    // The amount is present but not in the format the specification allows, so
+    // nothing has verified what the customer would be asked to pay. Previously
+    // this skipped the cross-check entirely and was shown.
+    const commaDecimal = sealed(
+      tlv('00', '01') +
+        tlv('26', tlv('00', 'BR.GOV.BCB.PIX') + tlv('01', '+5561999999999')) +
+        tlv('54', '10,00') +
+        tlv('58', 'BR') +
+        '6304',
+    );
+    expect(() => assertPresentableBrCode(commaDecimal, 1000n)).toThrow(/could not be read/);
   });
 
   it('refuses an empty code', () => {
@@ -154,7 +172,24 @@ describe('inspecting a code', () => {
       hasValidChecksum: true,
       declaresPixDomain: true,
       amountMinor: 1000n,
+      declaresAmount: true,
     });
+  });
+
+  it('separates an absent amount from an unreadable one', () => {
+    // Both read as "no amount I can use", but they are different faults and each
+    // must be refused for its own reason.
+    expect(inspectBrCode(sealed(WITHOUT_AMOUNT)).declaresAmount).toBe(false);
+
+    const unreadable = sealed(
+      tlv('00', '01') +
+        tlv('26', tlv('00', 'BR.GOV.BCB.PIX') + tlv('01', '+5561999999999')) +
+        tlv('54', 'abc') +
+        tlv('58', 'BR') +
+        '6304',
+    );
+    expect(inspectBrCode(unreadable).declaresAmount).toBe(true);
+    expect(inspectBrCode(unreadable).amountMinor).toBeUndefined();
   });
 
   it('reports a failing checksum without throwing', () => {

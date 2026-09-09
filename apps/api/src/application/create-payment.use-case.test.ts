@@ -116,7 +116,9 @@ function instrumentFrom(
 }
 
 function registryWith(provider: PixPaymentProvider): ProviderRegistry {
-  return new ProviderRegistry([{ descriptor: provider.descriptor, pix: provider, priority: 1 }]);
+  return new ProviderRegistry([
+    { descriptor: provider.descriptor, environment: 'SANDBOX', pix: provider, priority: 1 },
+  ]);
 }
 
 const INPUT: CreatePaymentInput = {
@@ -462,6 +464,7 @@ function registryOf(...providers: PixPaymentProvider[]): ProviderRegistry {
   return new ProviderRegistry(
     providers.map((provider, index) => ({
       descriptor: provider.descriptor,
+      environment: 'SANDBOX' as const,
       pix: provider,
       priority: index + 1,
     })),
@@ -616,5 +619,30 @@ describe('an adapter that throws', () => {
     });
 
     expect(store.calls.opened).toHaveLength(1);
+  });
+});
+
+describe('a provider is bound to the environment its credentials belong to', () => {
+  it('never serves a production payment from a sandbox registration', async () => {
+    // A sandbox code cannot be paid. Handing one to a production payment would
+    // tell a merchant their customer had something to pay when they had not.
+    const store = storeThatCreates();
+    const outcome = await createPayment(
+      { ...INPUT, environment: 'PRODUCTION' },
+      { store, providers: registryWith(providerReturning(GOOD_INSTRUMENT)) },
+    );
+
+    expect(outcome.kind).toBe('no_provider');
+    expect(store.calls.opened).toHaveLength(0);
+    expect(reasonOf(outcome)).toContain('PRODUCTION');
+  });
+
+  it('serves a sandbox payment from the sandbox registration', async () => {
+    const outcome = await createPayment(INPUT, {
+      store: storeThatCreates(),
+      providers: registryWith(providerReturning(GOOD_INSTRUMENT)),
+    });
+
+    expect(outcome.kind).toBe('created');
   });
 });
