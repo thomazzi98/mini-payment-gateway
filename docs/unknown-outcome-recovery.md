@@ -5,11 +5,13 @@ This document is for the operator holding the pager. It describes what an
 and how to resolve it safely.
 
 > **Status of this document.** The evidence described here is written by code
-> that exists and is covered by integration tests against real PostgreSQL. The
-> automated reconciliation loop that would consume that evidence **is not built
-> yet**. Until it is, every procedure below is manual. This is stated plainly
-> rather than implied, because the difference matters when something is wrong at
-> 3am.
+> that exists and is covered by integration tests against real PostgreSQL, and a
+> reconciliation worker now consumes it automatically. The procedures below are
+> for the payments the worker deliberately will not resolve: those whose attempt
+> recorded no provider reference, those whose provider reports an amount other
+> than the one expected, and those the worker has stopped asking about. This is
+> stated plainly rather than implied, because the difference matters when
+> something is wrong at 3am.
 
 ## What `unknown` means
 
@@ -176,9 +178,12 @@ fabricated success.
 Stated plainly, because a recovery document that overstates the machinery is
 worse than none.
 
-1. **There is no reconciliation worker.** `readPaymentState` is implemented and
-   the evidence needed to drive it is recorded, but nothing schedules it. Every
-   procedure above is currently manual, and no payment resolves itself.
+1. **Reconciliation only resolves what a provider will answer.** A payment whose
+   attempt recorded no provider reference cannot be inquired about at all, and
+   after a bounded number of fruitless inquiries the worker stops asking and
+   leaves the payment to a person. Those are the payments the procedures above
+   are for. The backlog is counted when the worker starts; nothing alerts on it
+   yet.
 2. **A claim stranded by a crash still needs reconciliation to clear.** If the
    process dies between opening the attempt and applying the outcome, the
    idempotency record stays `in_flight`. Past its 24-hour expiry the gateway now

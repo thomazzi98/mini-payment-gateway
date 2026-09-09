@@ -3,7 +3,7 @@
 What this system does not do, stated without hedging. A limitations document that
 reads like marketing is worse than none, because it teaches the reader to skip it.
 
-Everything here is current as of the payment-creation milestone. Each entry says
+Everything here is current as of the reconciliation milestone. Each entry says
 what is missing, what it costs, and what happens meanwhile.
 
 ## Live Appmax integration has not been performed end to end
@@ -28,28 +28,43 @@ against a controlled transport. Two documented inconsistencies in the Pix respon
 shape are handled defensively because the documentation contradicts itself about
 them, and which one is real will only be known when a live call is made.
 
-## There is no reconciliation worker
+## Reconciliation resolves uncertainty, but only what a provider will answer
 
-This is the largest gap, and several other entries depend on it.
+A reconciliation worker now discovers uncertain payments, inquires through the
+provider abstraction, and resolves them on authoritative evidence. What it cannot
+do is bounded and deliberate:
 
-`readPaymentState` is implemented, and every unknown outcome is recorded with the
-provider reference needed to resolve it. Nothing schedules that read. No payment
-resolves itself, and no `unknown` payment leaves that state without a person.
+- **A payment whose attempt never recorded a provider reference cannot be
+  resolved by inquiry at all.** Appmax offers no order search, so there is nothing
+  to ask about. Only a person can close these.
+- **After a bounded number of fruitless inquiries the worker stops asking.** The
+  payment stays `unknown` and unlocked, and becomes an operator's. That backlog is
+  counted at worker startup; nothing yet alerts on it.
+- **A provider that reports an amount other than the one expected is not
+  resolved.** This is correct — a Pix code carries a fixed amount, so a
+  disagreement means the reference is not the payment we think it is — but it
+  means such payments accumulate for an operator.
+- **A claim stranded by a crash is reported honestly once past its expiry, but
+  only resolving the payment clears it.** See
+  [unknown-outcome-recovery.md](unknown-outcome-recovery.md).
+- **Nothing expires an `awaiting_payment` payment whose instrument has lapsed.**
+  Expiry is still not driven from the provider's own `expires_at`, so a payment
+  whose code has quietly died stays `awaiting_payment` until something asks.
 
-Consequences:
-
-- A payment whose outcome could not be determined stays `unknown` indefinitely.
-- A claim stranded by a crash stays stranded. It is reported honestly as such once
-  past its expiry rather than as "retry shortly", but only reconciliation clears
-  it. See [unknown-outcome-recovery.md](unknown-outcome-recovery.md).
-- Nothing expires an `awaiting_payment` payment whose instrument has lapsed.
-  Expiry is not yet driven from the provider's own `expires_at`.
+The mechanism has been exercised end to end against a running stack with an
+uncertain payment, and the backoff and deferral observed directly. It has **not**
+been exercised against a real Appmax response, for the reason in the first
+section.
 
 ## No webhooks, in either direction
 
-Appmax webhooks are not ingested, and merchants receive no callbacks. A payment
-that a customer actually pays will not be observed, because observing it requires
-either the webhook path or the polling that does not exist yet.
+Appmax webhooks are not ingested, and merchants receive no callbacks.
+
+Reconciliation observes a payment only while it is `unknown`. A payment that
+reached `awaiting_payment` normally and is then paid by the customer is **not**
+observed by anything: there is no webhook path, and the worker does not poll
+payments that are merely waiting. Confirming an ordinary payment is the next gap
+to close, and it is the one that matters most for a working gateway.
 
 The schema is ready for this — a funds-bearing transition requires
 `authenticated_provider_read` evidence, so a forged webhook is structurally
@@ -109,6 +124,12 @@ They do prove, against real PostgreSQL:
 - The per-organization ceiling is refused by the database even when the
   application does not check.
 - History cannot be rewritten or deleted, including by the role that wrote it.
+- Two workers claiming at once never take the same uncertain payment, a lease is
+  released rather than held when a worker stops, and a second resolution of the
+  same payment is reported as already resolved rather than applied twice.
+- A payment cannot be recorded paid on evidence weaker than a provider read, and
+  an edge the transition table does not declare is refused whatever the caller
+  believes.
 
 They do not prove:
 
@@ -116,9 +137,11 @@ They do not prove:
   a controlled transport.
 - That the system behaves correctly under a real provider outage, as opposed to a
   simulated one.
-- Anything about a payment after creation, because nothing after creation exists.
-- That the stack survives a process being killed mid-payment. The recovery path is
-  designed and recorded but has not been exercised by actually killing anything.
+- That a payment is ever confirmed as paid in ordinary operation, because nothing
+  observes a payment that is merely waiting.
+- That the stack survives a process being killed mid-payment. The worker's loop is
+  tested for restart and shutdown behaviour, and a lease is proven to be released
+  rather than held, but no test kills an actual process mid-payment.
 
 ## Known operational sharp edge
 
