@@ -38,6 +38,12 @@ const PATTERNS = [
 // real one. These are the only places a placeholder is expected to live.
 const ALLOWED_PATHS = new Set(['.env.example', 'scripts/scan-secrets.mjs']);
 
+// A deliberate fixture — a fake credential a test needs in order to prove it is
+// handled safely — is marked in the source and skipped here. The marker is
+// per-line and must be written out, so silencing a finding is a visible decision
+// in a diff rather than a pattern quietly loosened for everyone.
+const ALLOW_MARKER = 'scan-secrets:allow';
+
 const BINARY_EXTENSIONS = new Set([
   '.png',
   '.jpg',
@@ -56,10 +62,12 @@ const BINARY_EXTENSIONS = new Set([
 ]);
 
 const MAXIMUM_FILE_BYTES = 2_000_000;
+const NEWLINE = String.fromCodePoint(10);
+const NULL_BYTE = String.fromCodePoint(0);
 
 function trackedFiles() {
   return execFileSync('git', ['ls-files', '-z'], { encoding: 'utf8' })
-    .split('\0')
+    .split(NULL_BYTE)
     .filter((path) => path.length > 0);
 }
 
@@ -81,40 +89,50 @@ function isScannable(path) {
   }
 }
 
-const findings = [];
-
-const scannablePaths = trackedFiles().filter((candidate) => isScannable(candidate));
-
-for (const path of scannablePaths) {
-  let contents;
+function readTextOrNothing(path) {
   try {
-    contents = readFileSync(path, 'utf8');
+    const contents = readFileSync(path, 'utf8');
+    return contents.includes(NULL_BYTE) ? undefined : contents;
   } catch {
-    continue;
-  }
-  if (contents.includes('\0')) {
-    continue;
-  }
-
-  const lines = contents.split('\n');
-  for (const [index, line] of lines.entries()) {
-    for (const { name, pattern } of PATTERNS) {
-      pattern.lastIndex = 0;
-      if (pattern.test(line)) {
-        findings.push({ path, line: index + 1, name });
-      }
-    }
+    return;
   }
 }
 
+function findingsInFile(path, contents) {
+  const found = [];
+  const lines = contents.split(NEWLINE);
+
+  for (const [index, line] of lines.entries()) {
+    const previousLine = index > 0 ? (lines[index - 1] ?? '') : '';
+    if (line.includes(ALLOW_MARKER) || previousLine.includes(ALLOW_MARKER)) {
+      continue;
+    }
+    for (const { name, pattern } of PATTERNS) {
+      pattern.lastIndex = 0;
+      if (pattern.test(line)) {
+        found.push({ path, line: index + 1, name });
+      }
+    }
+  }
+
+  return found;
+}
+
+const findings = trackedFiles()
+  .filter((candidate) => isScannable(candidate))
+  .flatMap((path) => {
+    const contents = readTextOrNothing(path);
+    return contents === undefined ? [] : findingsInFile(path, contents);
+  });
+
 if (findings.length > 0) {
-  console.error(`Found ${findings.length} possible secret(s) in tracked files:\n`);
+  console.error(`Found ${findings.length} possible secret(s) in tracked files:`);
   for (const finding of findings) {
     // The match itself is never printed: doing so would copy the secret into CI
     // logs, which are usually more widely readable than the repository.
     console.error(`  ${finding.path}:${finding.line}  ${finding.name}`);
   }
-  console.error('\nRotate the credential, then remove it from the file and the history.');
+  console.error('Rotate the credential, then remove it from the file and the history.');
   process.exit(1);
 }
 

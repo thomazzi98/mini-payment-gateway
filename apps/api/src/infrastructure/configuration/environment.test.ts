@@ -69,6 +69,9 @@ describe('loading configuration', () => {
     // puts that password into the startup log of every failed boot.
     let message = '';
     try {
+      // A fabricated credential, present precisely so the assertion below can
+      // prove it never reaches the error message.
+      // scan-secrets:allow
       loadEnvironment({ DATABASE_URL: 'postgres://user:hunter2@host:5432/db', REDIS_URL: '' });
     } catch (error) {
       message = error instanceof Error ? error.message : '';
