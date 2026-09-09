@@ -272,8 +272,18 @@ It prints the key once, because only its hash is stored.
 ```bash
 npm test                                       # unit: domain, shared, tools
 npx vitest run --project api                   # unit: the api, no external services
+
+docker compose stop worker                     # see below
 docker compose --profile test run --rm test    # integration, against real PostgreSQL
 ```
+
+**Integration tests need exclusive use of the database.** The reconciliation
+worker claims uncertain payments across every organization — that is its job — so
+a worker polling the same database will occasionally claim a payment a test just
+created, and the test will not see it in its own claim. That is the worker
+behaving correctly and the test being wrong to assume otherwise, so the fix is to
+stop the worker rather than to weaken the assertion. CI runs no worker alongside
+the tests; local development does.
 
 Integration tests connect as two roles on purpose: the owner seeds fixtures and
 inspects results, and the application role is the one under test. A test that
