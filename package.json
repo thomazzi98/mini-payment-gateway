@@ -36,7 +36,7 @@
     "docs:generate": "node scripts/verify-docs.mjs --write",
     "docs:check": "node scripts/verify-docs.mjs",
     "scan:secrets": "node scripts/scan-secrets.mjs",
-    "validate:appmax": "node --experimental-strip-types scripts/validate-appmax.ts",
+    "validate:appmax": "node scripts/validate-appmax.mjs",
     "prepare": "node scripts/install-git-hooks.mjs"
   },
   "devDependencies": {
