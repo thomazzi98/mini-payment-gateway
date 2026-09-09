@@ -100,6 +100,8 @@ export default typescriptEslint.config(
             // environment -> env). This project expands abbreviations, so those
             // defaults are disabled and the expansions below are added instead.
             application: false,
+            repository: false,
+            repositories: false,
             applications: false,
             environment: false,
             environments: false,
