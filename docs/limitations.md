@@ -44,8 +44,10 @@ do is bounded and deliberate:
   resolved.** This is correct — a Pix code carries a fixed amount, so a
   disagreement means the reference is not the payment we think it is — but it
   means such payments accumulate for an operator.
-- **A claim stranded by a crash is reported honestly once past its expiry, but
-  only resolving the payment clears it.** See
+- **A claim stranded by a crash clears once the sweep runs**, which is bounded by
+  the staleness threshold rather than immediate. Until then a retry of that key is
+  told the request is still being processed, which is the truth for the first few
+  minutes and stops being it after that. See
   [unknown-outcome-recovery.md](unknown-outcome-recovery.md).
 - **Nothing expires an `awaiting_payment` payment whose instrument has lapsed.**
   Expiry is still not driven from the provider's own `expires_at`, so a payment
@@ -127,6 +129,8 @@ They do prove, against real PostgreSQL:
 - Two workers claiming at once never take the same uncertain payment, a lease is
   released rather than held when a worker stops, and a second resolution of the
   same payment is reported as already resolved rather than applied twice.
+- A payment abandoned in `processing` is discovered, moved to `unknown`, and its
+  idempotency key released, so a retry replays rather than being refused forever.
 - A payment cannot be recorded paid on evidence weaker than a provider read, and
   an edge the transition table does not declare is refused whatever the caller
   believes.

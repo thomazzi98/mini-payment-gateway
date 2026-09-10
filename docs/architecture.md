@@ -127,6 +127,27 @@ An enqueue is a dual write, and a payment that reached `unknown` by a path that
 forgot to enqueue would never be reconciled — which is exactly the path already
 going wrong.
 
+### Payments abandoned mid-flight
+
+An attempt is opened and committed in `processing` before the provider is called,
+so a process that dies inside that call leaves the payment there with its claim
+still open. Nothing else can move it, and while it sits there it holds both its
+merchant reference and its idempotency key.
+
+Each batch therefore sweeps first: payments in `processing` or `pending` older
+than a generous threshold are moved to `unknown` and their claims released, in one
+transaction. `unknown` is the honest destination — a request was sent and no
+answer was recorded, so whether anything was created is exactly what nobody knows
+— and it puts the payment into the machinery above.
+
+The claim completes with what the payment now is rather than with what the caller
+received, because the caller received nothing: the process handling their request
+died. A retry of that key then learns the payment exists and is uncertain, instead
+of being told forever that something is still being processed.
+
+The threshold is generous on purpose. Sweeping a payment that is merely slow would
+move it out from under the request still working on it.
+
 **A lease is not a lock.** A worker that dies delays its claimed payments by one
 lease and strands none.
 
