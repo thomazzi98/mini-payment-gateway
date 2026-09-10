@@ -2,7 +2,7 @@
 
 # Payment lifecycle
 
-A payment holds one of 11 statuses, and exactly 25 status-changing edges are declared in `apps/api/src/domain/payment/payment-transition-table.ts`. That table is the single source of truth: the state machine and this document are both derived from it, and CI fails if they disagree.
+A payment holds one of 11 statuses, and exactly 26 status-changing edges are declared in `apps/api/src/domain/payment/payment-transition-table.ts`. That table is the single source of truth: the state machine and this document are both derived from it, and CI fails if they disagree.
 
 Of the 110 ordered pairs of distinct statuses, only the edges below are permitted. The test suite enumerates the full Cartesian product of statuses and triggers rather than sampling it.
 
@@ -13,7 +13,7 @@ Of the 110 ordered pairs of distinct statuses, only the edges below are permitte
 | `pending` | no | no | `processing`, `cancelled`, `failed` |
 | `processing` | no | no | `awaiting_payment`, `failed`, `unknown`, `pending` |
 | `unknown` | no | no | `awaiting_payment`, `pending`, `paid`, `expired`, `failed` |
-| `awaiting_payment` | no | no | `paid`, `expired`, `cancelled`, `unknown` |
+| `awaiting_payment` | no | no | `paid`, `failed`, `expired`, `cancelled`, `unknown` |
 | `paid` | no | yes | `partially_refunded`, `refunded`, `chargeback` |
 | `partially_refunded` | no | yes | `refunded`, `chargeback` |
 | `refunded` | yes | yes | — |
@@ -40,17 +40,18 @@ Of the 110 ordered pairs of distinct statuses, only the edges below are permitte
 | 12 | `unknown` | `failed` | `RECONCILED_FAILED` | `authenticated_provider_read` | Reconciliation found the provider had positively refused the uncertain attempt. |
 | 13 | `unknown` | `failed` | `RESOLUTION_EXHAUSTED` | `operator` | The uncertainty could not be resolved within its window and an operator closed it. |
 | 14 | `awaiting_payment` | `paid` | `PAYMENT_CONFIRMED` | `authenticated_provider_read` | The provider confirmed, on an authenticated read, that the customer paid. |
-| 15 | `awaiting_payment` | `expired` | `EXPIRY_ELAPSED` | `authenticated_provider_read` | The instrument lapsed without payment. |
-| 16 | `awaiting_payment` | `cancelled` | `MERCHANT_CANCELLED` | `internal` | The merchant withdrew the payment while it was still unpaid. |
-| 17 | `awaiting_payment` | `unknown` | `PROVIDER_OUTCOME_UNKNOWN` | `internal` | The provider stopped answering, so the instrument state is no longer known. |
-| 18 | `expired` | `paid` | `LATE_PAYMENT_CONFIRMED` | `authenticated_provider_read` | The customer paid after the instrument lapsed. The money arrived, so it is recorded rather than denied. |
-| 19 | `paid` | `partially_refunded` | `PARTIAL_REFUND_SETTLED` | `authenticated_provider_read` | Part of the captured amount was returned. |
-| 20 | `paid` | `refunded` | `REFUND_SETTLED` | `authenticated_provider_read` | The whole captured amount was returned. |
-| 21 | `paid` | `chargeback` | `CHARGEBACK_OPENED` | `authenticated_provider_read` | The issuing bank reversed the payment and a dispute is open. |
-| 22 | `partially_refunded` | `refunded` | `REFUND_SETTLED` | `authenticated_provider_read` | The remainder was returned, so nothing is left captured. |
-| 23 | `partially_refunded` | `chargeback` | `CHARGEBACK_OPENED` | `authenticated_provider_read` | A dispute was opened over what remains captured. |
-| 24 | `chargeback` | `paid` | `CHARGEBACK_WON` | `authenticated_provider_read` | The dispute was resolved in the merchant’s favour. |
-| 25 | `chargeback` | `refunded` | `CHARGEBACK_LOST` | `authenticated_provider_read` | The dispute was lost and the money returned to the customer. |
+| 15 | `awaiting_payment` | `failed` | `PAYMENT_REFUSED` | `authenticated_provider_read` | The provider refused a live order outright, so no payment will arrive against it. |
+| 16 | `awaiting_payment` | `expired` | `EXPIRY_ELAPSED` | `authenticated_provider_read` | The instrument lapsed without payment. |
+| 17 | `awaiting_payment` | `cancelled` | `MERCHANT_CANCELLED` | `internal` | The merchant withdrew the payment while it was still unpaid. |
+| 18 | `awaiting_payment` | `unknown` | `PROVIDER_OUTCOME_UNKNOWN` | `internal` | The provider stopped answering, so the instrument state is no longer known. |
+| 19 | `expired` | `paid` | `LATE_PAYMENT_CONFIRMED` | `authenticated_provider_read` | The customer paid after the instrument lapsed. The money arrived, so it is recorded rather than denied. |
+| 20 | `paid` | `partially_refunded` | `PARTIAL_REFUND_SETTLED` | `authenticated_provider_read` | Part of the captured amount was returned. |
+| 21 | `paid` | `refunded` | `REFUND_SETTLED` | `authenticated_provider_read` | The whole captured amount was returned. |
+| 22 | `paid` | `chargeback` | `CHARGEBACK_OPENED` | `authenticated_provider_read` | The issuing bank reversed the payment and a dispute is open. |
+| 23 | `partially_refunded` | `refunded` | `REFUND_SETTLED` | `authenticated_provider_read` | The remainder was returned, so nothing is left captured. |
+| 24 | `partially_refunded` | `chargeback` | `CHARGEBACK_OPENED` | `authenticated_provider_read` | A dispute was opened over what remains captured. |
+| 25 | `chargeback` | `paid` | `CHARGEBACK_WON` | `authenticated_provider_read` | The dispute was resolved in the merchant’s favour. |
+| 26 | `chargeback` | `refunded` | `CHARGEBACK_LOST` | `authenticated_provider_read` | The dispute was lost and the money returned to the customer. |
 
 ## Diagram
 
@@ -71,6 +72,7 @@ stateDiagram-v2
     unknown --> failed : RECONCILED_FAILED
     unknown --> failed : RESOLUTION_EXHAUSTED
     awaiting_payment --> paid : PAYMENT_CONFIRMED
+    awaiting_payment --> failed : PAYMENT_REFUSED
     awaiting_payment --> expired : EXPIRY_ELAPSED
     awaiting_payment --> cancelled : MERCHANT_CANCELLED
     awaiting_payment --> unknown : PROVIDER_OUTCOME_UNKNOWN
