@@ -476,3 +476,152 @@ describe('one payment the database refuses does not stop the batch', () => {
     expect(run.resolutions).toHaveLength(0);
   });
 });
+
+const WAITING: DuePayment = { ...DUE, status: 'awaiting_payment' };
+
+describe('a payment that is simply waiting to be paid', () => {
+  it('is confirmed through the lifecycle trigger, not the discovery one', async () => {
+    // An operator reading the history should be able to tell which question was
+    // being answered: was this payment ever created, or has it been paid?
+    const store = storeFor([WAITING]);
+    await reconcileDuePayments(dependenciesFor(store, observing('paid')));
+
+    expect(store.calls.applied[0]?.toStatus).toBe('paid');
+    expect(store.calls.applied[0]?.trigger).toBe('PAYMENT_CONFIRMED');
+    expect(store.calls.applied[0]?.evidenceClass).toBe('authenticated_provider_read');
+  });
+
+  it('is refused through the lifecycle trigger when the provider refuses it', async () => {
+    const store = storeFor([WAITING]);
+    await reconcileDuePayments(dependenciesFor(store, observing('failed')));
+
+    expect(store.calls.applied[0]?.toStatus).toBe('failed');
+    expect(store.calls.applied[0]?.trigger).toBe('PAYMENT_REFUSED');
+  });
+
+  it('stays waiting when the provider says nobody has paid yet', async () => {
+    // The expected answer for most of an instrument's life. Not a transition and
+    // not a failure.
+    const store = storeFor([WAITING]);
+    const run = await reconcileDuePayments(dependenciesFor(store, observing('awaiting_payment')));
+
+    expect(run.resolutions[0]?.kind).toBe('still_awaiting');
+    expect(store.calls.applied).toHaveLength(0);
+  });
+
+  it('does not spend the attempt budget on a provider that answered', async () => {
+    // The budget exists to stop asking about payments nobody can answer for.
+    // Charging a good answer against it would abandon an ordinary unpaid Pix to
+    // an operator after a dozen correct replies.
+    const store = storeFor([WAITING]);
+    await reconcileDuePayments(dependenciesFor(store, observing('awaiting_payment')));
+
+    expect(store.calls.deferred[0]?.isHealthy).toBe(true);
+    expect(store.calls.deferred[0]?.dueAt).toBeInstanceOf(Date);
+  });
+
+  it('never becomes uncertain because an inquiry failed', async () => {
+    // This is the distinction the design rests on. UNKNOWN is doubt about whether
+    // the original operation happened; a failed poll says nothing about that.
+    const store = storeFor([WAITING]);
+    const run = await reconcileDuePayments(
+      dependenciesFor(
+        store,
+        provider(() => Promise.resolve({ outcome: 'unknown_outcome', reason: 'timed out' })),
+      ),
+    );
+
+    expect(run.resolutions[0]?.kind).toBe('still_awaiting');
+    expect(store.calls.applied).toHaveLength(0);
+    // Spent, because nobody answered.
+    expect(store.calls.deferred[0]?.isHealthy).toBe(false);
+  });
+
+  it('never becomes uncertain because the adapter threw', async () => {
+    const store = storeFor([WAITING]);
+    const run = await reconcileDuePayments(
+      dependenciesFor(
+        store,
+        provider(() => Promise.reject(new Error('socket hang up'))),
+      ),
+    );
+
+    expect(run.resolutions[0]?.kind).toBe('still_awaiting');
+    expect(store.calls.applied).toHaveLength(0);
+  });
+
+  it('is left to an operator when the provider cannot be reached at all', async () => {
+    const store = storeFor([
+      { ...WAITING, attempts: DEFAULT_RECONCILIATION_SCHEDULE.maximumAttempts },
+    ]);
+    const run = await reconcileDuePayments(
+      dependenciesFor(
+        store,
+        provider(() => Promise.resolve({ outcome: 'unknown_outcome', reason: 'unreachable' })),
+      ),
+    );
+
+    expect(run.resolutions[0]?.kind).toBe('awaiting_operator');
+    // Unscheduled, still waiting, still unlocked. Never uncertain.
+    expect(store.calls.deferred[0]?.dueAt).toBeUndefined();
+    expect(store.calls.applied).toHaveLength(0);
+  });
+});
+
+/**
+ * A waiting payment whose instrument lapsed the given number of milliseconds ago.
+ */
+function lapsedFor(milliseconds: number): DuePayment {
+  return { ...WAITING, expiresAt: new Date(NOW.getTime() - milliseconds) };
+}
+
+const LONG_AGO = 3_600_000;
+
+describe('an instrument that has outlived itself', () => {
+  it('is expired once its own deadline has passed by the margin, and the provider confirms nobody paid', () => {
+    // Both halves. A timestamp alone is a guess; the read is what makes it a fact.
+    expect(DEFAULT_RECONCILIATION_SCHEDULE.expiryGraceSeconds).toBeGreaterThan(0);
+  });
+
+  it('records the expiry on an authenticated read', async () => {
+    const store = storeFor([lapsedFor(LONG_AGO)]);
+    await reconcileDuePayments(dependenciesFor(store, observing('awaiting_payment')));
+
+    expect(store.calls.applied[0]?.toStatus).toBe('expired');
+    expect(store.calls.applied[0]?.trigger).toBe('EXPIRY_ELAPSED');
+    expect(store.calls.applied[0]?.evidenceClass).toBe('authenticated_provider_read');
+  });
+
+  it('waits out the grace margin rather than expiring on the stroke of the deadline', async () => {
+    // The provider's clock is not ours. Expiring one second early would deny a
+    // customer who paid inside the window.
+    const store = storeFor([lapsedFor(1000)]);
+    const run = await reconcileDuePayments(dependenciesFor(store, observing('awaiting_payment')));
+
+    expect(store.calls.applied).toHaveLength(0);
+    expect(run.resolutions[0]?.kind).toBe('still_awaiting');
+  });
+
+  it('never expires a payment the provider reports as paid', async () => {
+    // The money arrived. A lapsed deadline does not undo that.
+    const store = storeFor([lapsedFor(LONG_AGO)]);
+    await reconcileDuePayments(dependenciesFor(store, observing('paid')));
+
+    expect(store.calls.applied[0]?.toStatus).toBe('paid');
+  });
+
+  it('does not expire a payment with no instrument deadline recorded', async () => {
+    const store = storeFor([WAITING]);
+    await reconcileDuePayments(dependenciesFor(store, observing('awaiting_payment')));
+
+    expect(store.calls.applied).toHaveLength(0);
+  });
+
+  it('does not expire an uncertain payment, which has no confirmed instrument', async () => {
+    const store = storeFor([{ ...DUE, expiresAt: new Date(NOW.getTime() - LONG_AGO) }]);
+    await reconcileDuePayments(dependenciesFor(store, observing('awaiting_payment')));
+
+    // From unknown, a live instrument is a discovery rather than an expiry.
+    expect(store.calls.applied[0]?.trigger).toBe('RECONCILED_INSTRUMENT_LIVE');
+  });
+});
