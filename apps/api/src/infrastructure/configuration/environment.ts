@@ -51,6 +51,13 @@ const environmentSchema = baseEnvironmentSchema.extend({
   // Generous by default: sweeping one that is merely slow would move it out from
   // under the request still working on it.
   RECONCILIATION_STRANDED_AFTER_SECONDS: z.coerce.number().int().min(60).default(900),
+
+  // The unguessable segment of the provider notification URL. Appmax sends no
+  // signature of any kind, so this bounds who can reach the endpoint at all. It
+  // is not what protects the money: a notification can only schedule an
+  // authenticated read, and the database refuses to fund a payment on anything
+  // less.
+  WEBHOOK_PATH_SECRET: z.string().min(24),
 });
 
 export type Environment = z.infer<typeof environmentSchema>;

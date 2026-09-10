@@ -33,8 +33,10 @@ import type { AppmaxTokenCache } from './appmax-token-cache.js';
  * external reference, so it is attempted exactly once and never retried.
  */
 
+export const APPMAX_PROVIDER_CODE = 'appmax';
+
 export const APPMAX_DESCRIPTOR: ProviderDescriptor = {
-  code: 'appmax',
+  code: APPMAX_PROVIDER_CODE,
   displayName: 'Appmax',
   capabilities: ['pix.create', 'pix.status', 'order.read', 'refund.full', 'webhook.receive'],
   supportedCurrencies: ['BRL'],

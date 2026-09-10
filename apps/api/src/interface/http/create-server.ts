@@ -6,6 +6,8 @@ import type { ApplicationServer } from './server-types.js';
 import { registerErrorHandling } from './error-handling.js';
 import { registerHealthRoutes } from './routes/health.routes.js';
 import { registerPaymentRoutes } from './routes/payment.routes.js';
+import { registerWebhookRoutes } from './routes/webhook.routes.js';
+import type { WebhookRouteDependencies } from './routes/webhook.routes.js';
 import type { PaymentRouteDependencies } from './routes/payment.routes.js';
 
 export interface ServerDependencies {
@@ -14,6 +16,7 @@ export interface ServerDependencies {
   readonly database: Database;
   readonly authentication: PaymentRouteDependencies['authentication'];
   readonly payments: PaymentRouteDependencies['payments'];
+  readonly webhooks: WebhookRouteDependencies;
 }
 
 const REQUEST_IDENTIFIER_PATTERN = /^[\w-]{8,64}$/;
@@ -52,6 +55,7 @@ export function createServer(dependencies: ServerDependencies): ApplicationServe
     authentication: dependencies.authentication,
     payments: dependencies.payments,
   });
+  registerWebhookRoutes(server, dependencies.webhooks);
 
   return server;
 }

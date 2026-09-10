@@ -14,6 +14,9 @@ import type { CreatePaymentDependencies } from './application/create-payment.use
 import { DEFAULT_RECONCILIATION_SCHEDULE } from './application/reconcile-payments.use-case.js';
 import type { ReconciliationDependencies } from './application/reconcile-payments.use-case.js';
 import { PaymentReconciliationRepository } from './infrastructure/persistence/payment-reconciliation.repository.js';
+import { ProviderWebhookRepository } from './infrastructure/persistence/provider-webhook.repository.js';
+import { AppmaxWebhookReceiver } from './infrastructure/providers/appmax/appmax-webhook.js';
+import type { WebhookRouteDependencies } from './interface/http/routes/webhook.routes.js';
 import {
   AppmaxPixProvider,
   APPMAX_DESCRIPTOR,
@@ -34,6 +37,7 @@ export interface ApplicationContext {
    * rather than participating in resolving a payment.
    */
   readonly reconciliationInsight: PaymentReconciliationRepository;
+  readonly webhooks: WebhookRouteDependencies;
   shutdown(): Promise<void>;
 }
 
@@ -113,6 +117,14 @@ export function buildApplicationContext(): ApplicationContext {
     providers,
   };
 
+  const webhooks: WebhookRouteDependencies = {
+    appmax: {
+      receiver: new AppmaxWebhookReceiver(),
+      store: new ProviderWebhookRepository(pool),
+    },
+    pathSecret: new Secret(environment.WEBHOOK_PATH_SECRET),
+  };
+
   const reconciliationRepository = new PaymentReconciliationRepository(pool);
   const reconciliation: ReconciliationDependencies = {
     store: reconciliationRepository,
@@ -139,6 +151,7 @@ export function buildApplicationContext(): ApplicationContext {
     payments,
     reconciliation,
     reconciliationInsight: reconciliationRepository,
+    webhooks,
     async shutdown(): Promise<void> {
       // One pool, closed once. Database wraps it rather than owning a second.
       await database.close();

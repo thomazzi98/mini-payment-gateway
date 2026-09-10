@@ -104,6 +104,7 @@ services:
       APPMAX_CLIENT_ID: ${APPMAX_CLIENT_ID:-}
       APPMAX_CLIENT_SECRET: ${APPMAX_CLIENT_SECRET:-}
       APPMAX_ENVIRONMENT: ${APPMAX_ENVIRONMENT:-SANDBOX}
+      WEBHOOK_PATH_SECRET: ${WEBHOOK_PATH_SECRET:?WEBHOOK_PATH_SECRET is required}
     ports:
       - '127.0.0.1:${API_HOST_PORT:-4010}:3000'
     depends_on:
@@ -168,6 +169,7 @@ services:
       # A fixed value, so a test that hashes a key gets the same answer on every
       # run. It is not a secret and must never be the one used anywhere real.
       API_KEY_PEPPER: a-pepper-used-only-by-the-test-suite
+      WEBHOOK_PATH_SECRET: a-webhook-path-secret-used-only-by-tests
     depends_on:
       roles:
         condition: service_completed_successfully

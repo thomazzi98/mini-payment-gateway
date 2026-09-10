@@ -10,6 +10,7 @@ const MINIMUM_VALID = {
   REDIS_URL: 'redis://redis:6379',
   // Long enough to satisfy the schema and obviously not a real pepper.
   API_KEY_PEPPER: 'a-pepper-for-tests-only-not-a-real-one',
+  WEBHOOK_PATH_SECRET: 'a-webhook-path-secret-for-tests',
 } satisfies NodeJS.ProcessEnv;
 
 describe('loading configuration', () => {
@@ -48,6 +49,15 @@ describe('loading configuration', () => {
     expect(message).toContain('DATABASE_URL');
     expect(message).toContain('REDIS_URL');
     expect(message).toContain('API_KEY_PEPPER');
+    expect(message).toContain('WEBHOOK_PATH_SECRET');
+  });
+
+  it('refuses a webhook path secret short enough to guess', () => {
+    // The path is the only thing bounding who can reach the notification
+    // endpoint, so a short one is a guessable one.
+    expect(() => loadEnvironment({ ...MINIMUM_VALID, WEBHOOK_PATH_SECRET: 'short' })).toThrow(
+      EnvironmentValidationError,
+    );
   });
 
   it('refuses a pepper too short to be worth having', () => {
