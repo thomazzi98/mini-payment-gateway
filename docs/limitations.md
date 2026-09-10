@@ -3,8 +3,8 @@
 What this system does not do, stated without hedging. A limitations document that
 reads like marketing is worse than none, because it teaches the reader to skip it.
 
-Everything here is current as of the reconciliation milestone. Each entry says
-what is missing, what it costs, and what happens meanwhile.
+Everything here is current as of the payment-confirmation milestone. Each entry
+says what is missing, what it costs, and what happens meanwhile.
 
 ## Live Appmax integration has not been performed end to end
 
@@ -15,8 +15,29 @@ What has actually reached Appmax is one HTTPS request to
 which returned `401 invalid_client` and was correctly classified as an
 authentication failure. That proves egress works from inside the container, that
 TLS terminates, and that the OAuth2 request shape is accepted well enough to be
-rejected on credentials rather than on form. It proves nothing about order
-creation, Pix creation, response parsing against real payloads, or webhooks.
+rejected on credentials rather than on form.
+
+Stated plainly:
+
+```
+Real Pix creation:            NOT VERIFIED — no Sandbox credentials.
+Real Appmax webhook delivery: NOT VERIFIED — no externally authenticated
+                              provider environment.
+Real Appmax reconciliation:   NOT VERIFIED.
+```
+
+**The webhook envelope shape is unverified in particular.** The event names are
+documented and the parser handles them; the exact JSON layout Appmax posts has
+never been seen, because that needs a developer account this project does not
+have. The parser therefore reads defensively from the layouts the documentation
+implies and refuses what it cannot recognise, rather than asserting one shape is
+the shape. The fixtures in `appmax-webhook.test.ts` are what to check a real
+delivery against.
+
+That uncertainty is deliberately not load-bearing. A notification this parser
+misreads costs a scheduled read; the payment is still polled on its ordinary
+cadence and still resolved by an authenticated inquiry, so the worst case is
+latency rather than a lost payment.
 
 Sandbox credentials require an Appmax developer account, which requires an active
 CNPJ. Until `APPMAX_CLIENT_ID` and `APPMAX_CLIENT_SECRET` exist,
@@ -58,15 +79,17 @@ uncertain payment, and the backoff and deferral observed directly. It has **not*
 been exercised against a real Appmax response, for the reason in the first
 section.
 
-## No webhooks, in either direction
+## Merchants receive no callbacks
 
-Appmax webhooks are not ingested, and merchants receive no callbacks.
+Provider notifications are ingested; outbound merchant webhooks do not exist. A
+merchant learns a payment was paid only by asking, and there is no endpoint to ask
+through yet either — see the next entry.
 
-Reconciliation observes a payment only while it is `unknown`. A payment that
-reached `awaiting_payment` normally and is then paid by the customer is **not**
-observed by anything: there is no webhook path, and the worker does not poll
-payments that are merely waiting. Confirming an ordinary payment is the next gap
-to close, and it is the one that matters most for a working gateway.
+`payment.paid` is written durably when a payment is confirmed, but **nothing
+consumes it**. No delivery worker, no retry schedule, no merchant endpoints. What
+is established is that the event cannot be lost after the money commits, not that
+anything reads it. Delivery is the next milestone, and it is deliberately the
+first piece of the cross-repository integration rather than of this one.
 
 The schema is ready for this — a funds-bearing transition requires
 `authenticated_provider_read` evidence, so a forged webhook is structurally
@@ -79,7 +102,8 @@ incapable of marking a payment paid — but none of the machinery is built.
   silently accepted.
 - No refunds, despite `RefundCapableProvider` existing on the Appmax adapter.
 - No payment retrieval endpoint. A payment can be created and never read back over
-  HTTP.
+  HTTP, which is a real gap for a merchant: today the only way to learn a payment
+  was paid is to consume the event that nothing yet delivers.
 - Currency is fixed to BRL at the edge.
 
 ## Failover is bounded and does not retry the same provider
@@ -131,6 +155,13 @@ They do prove, against real PostgreSQL:
   same payment is reported as already resolved rather than applied twice.
 - A payment abandoned in `processing` is discovered, moved to `unknown`, and its
   idempotency key released, so a retry replays rather than being refused forever.
+- A waiting payment is polled, confirmed on an authenticated read, and never made
+  uncertain by a failed poll.
+- One notification delivered four times concurrently records one row and reports
+  one recorded and three duplicates.
+- A confirmed payment writes its paid event in the same transaction as the money,
+  and a refused transition rolls back both.
+- A payment already paid cannot be expired, failed, or confirmed again.
 - A payment cannot be recorded paid on evidence weaker than a provider read, and
   an edge the transition table does not declare is refused whatever the caller
   believes.
@@ -141,11 +172,11 @@ They do not prove:
   a controlled transport.
 - That the system behaves correctly under a real provider outage, as opposed to a
   simulated one.
-- That a payment is ever confirmed as paid in ordinary operation, because nothing
-  observes a payment that is merely waiting.
 - That the stack survives a process being killed mid-payment. The worker's loop is
   tested for restart and shutdown behaviour, and a lease is proven to be released
   rather than held, but no test kills an actual process mid-payment.
+- That the Appmax webhook parser handles a real Appmax delivery. Every fixture is
+  written from documentation, not from a delivery that happened.
 
 ## Known operational sharp edge
 

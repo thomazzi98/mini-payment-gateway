@@ -161,6 +161,131 @@ it is.
 See [unknown-outcome-recovery.md](unknown-outcome-recovery.md) for the operator
 procedure.
 
+## How a payment becomes paid
+
+A payment that reaches `awaiting_payment` is live and unpaid, and something has to
+notice when that changes. Two paths do, and neither is trusted alone.
+
+```
+awaiting_payment
+      │
+      ├── polling ─────────► the worker asks on a steady cadence
+      │                      (correctness: works with no webhook at all)
+      │
+      └── notification ────► the provider says something happened,
+                             which brings the next inquiry forward
+                             (latency: it does not decide anything)
+                             │
+                             ▼
+                    authenticated provider read
+                             │
+      ┌──────────────┬───────┴───────┬──────────────────┐
+      ▼              ▼               ▼                  ▼
+    paid          expired          failed        still awaiting
+PAYMENT_        EXPIRY_         PAYMENT_        rescheduled, and the
+CONFIRMED       ELAPSED         REFUSED         attempt budget untouched
+```
+
+**Polling is the correctness mechanism; notifications are a latency
+optimisation.** That is forced by the provider rather than chosen: Appmax sends no
+signature, and abandons delivery after four attempts. A gateway that depended on
+notifications would silently lose payments; one that only polls is merely slower.
+
+### UNKNOWN and AWAITING_PAYMENT are not the same thing
+
+They are the two states a poll can be answering about, and collapsing them is the
+mistake that matters most here.
+
+|                                     | `unknown`                                     | `awaiting_payment`                                       |
+| ----------------------------------- | --------------------------------------------- | -------------------------------------------------------- |
+| What it means                       | The creation may or may not have taken effect | It took effect, and nobody has paid yet                  |
+| A successful poll saying "not paid" | Reconciles to a live instrument               | Ordinary. Nothing changes                                |
+| A poll that fails                   | Stays uncertain, costs an attempt             | **Stays waiting**, costs an attempt                      |
+| Resolution vocabulary               | `RECONCILED_*`                                | `PAYMENT_CONFIRMED`, `EXPIRY_ELAPSED`, `PAYMENT_REFUSED` |
+
+A polling failure never turns a waiting payment into an uncertain one. Nothing
+about a failed inquiry casts doubt on whether the instrument was created — that
+was already established — so manufacturing doubt would be inventing a problem.
+
+An inquiry that succeeds and reports "not yet" does not spend the attempt budget.
+That budget exists to stop asking about payments nobody can answer for, and a
+provider that answered is not one of those; charging it would abandon an ordinary
+unpaid Pix to an operator after a dozen correct replies.
+
+### Expiry
+
+Requires both halves: the instrument's own `expires_at`, passed by a grace margin,
+**and** a provider read that came back and confirmed nobody paid. A timestamp
+alone is a guess. The margin exists because the provider's clock is not ours, and
+expiring one second early would deny a customer who paid inside the window.
+
+A payment the provider reports as paid is never expired, whatever its deadline
+says. The money arrived; a lapsed deadline does not undo that.
+
+## Provider notifications
+
+```
+POST /v1/webhooks/appmax/<secret>
+      │  raw bytes, parsed only by this route
+      ▼
+verify ──► parse ──► resolve the provider reference ──► record ──► bring the
+                                                         │         inquiry forward
+                                                    (unique index:
+                                                   redelivery is a no-op)
+```
+
+**A notification is never evidence.** It records that a provider said something
+and brings that payment's next inquiry forward; the read decides. The database
+enforces this rather than the code promising it: a funded transition demands
+`authenticated_provider_read`, so the endpoint could not mark a payment paid even
+if it tried. The worst a forged notification achieves is one provider call the
+payment would have made anyway.
+
+**No signature is invented.** Appmax documents that its webhooks carry none, so
+the receiver reports `signsNotifications: false` rather than implementing a check
+that always passes — a check that always passes reads as security to everyone
+after it. The endpoint is bounded instead by an unguessable path segment, which is
+our own shared secret rather than a pretence at verifying the provider's. It is
+compared in constant time, and a wrong secret answers exactly as an unknown path
+does, so a prober learns nothing from the difference.
+
+**Ownership comes from the provider reference**, which was recorded on an attempt
+against one payment of one merchant. There is no merchant, organization or payment
+id in the payload to be trusted, so a notification cannot be aimed at somebody
+else's payment.
+
+**Duplicate delivery is the norm.** At-least-once is what providers do, so a
+unique index on (provider, delivery id) makes a redelivery a no-op — decided by
+the database, so it holds across restarts and across processes. Where a provider
+sends no delivery id, one is derived from the raw bytes.
+
+Every legitimate notification answers `202 {"received": true}`, so a sender cannot
+use the endpoint to discover which references this gateway holds.
+
+## Payment events
+
+```
+payment reaches paid
+      │  same transaction
+      ▼
+payment_events row  ──►  (delivery is a later milestone)
+```
+
+`payment.paid` is written in the same transaction as the money. There is no moment
+at which the payment is paid and the event is not there to be delivered, so "paid,
+and nobody was told" is not a state this database can hold. A refused transition
+rolls back both.
+
+It is a table rather than a broker because the delivery it exists for is one HTTP
+call to another service, and a queue product would add an operational component to
+avoid a problem a row already solves. `UNIQUE (payment_id, event_type)` means one
+payment produces one paid event however many times the path is retried.
+
+The payload carries the payment id, organization, merchant reference, environment,
+currency, amount in minor units, paid timestamp, provider, provider reference and
+attempt id — and no credential of any kind. **Nothing consumes it yet**: what is
+established now is that the event exists, not that anything reads it.
+
 ## Provider abstraction
 
 The domain never learns a processor's vocabulary.
