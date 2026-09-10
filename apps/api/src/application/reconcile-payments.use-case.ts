@@ -1,5 +1,9 @@
 import type { ObservedPaymentState } from './ports/payment-provider.js';
-import type { DuePayment, ReconciliationStore } from './ports/payment-reconciliation.repository.js';
+import type {
+  DuePayment,
+  ReconciliationStore,
+  StrandedPaymentStore,
+} from './ports/payment-reconciliation.repository.js';
 import type { ProviderRegistry } from './provider-registry.js';
 
 /**
@@ -30,6 +34,12 @@ export interface ReconciliationSchedule {
   readonly maximumAttempts: number;
   readonly baseBackoffSeconds: number;
   readonly maximumBackoffSeconds: number;
+  /**
+   * How long a payment may sit in `processing` or `pending` before it is treated
+   * as abandoned. Generous, because a payment that is merely slow must never be
+   * swept out from under the request still working on it.
+   */
+  readonly strandedAfterSeconds: number;
 }
 
 export const DEFAULT_RECONCILIATION_SCHEDULE: ReconciliationSchedule = {
@@ -38,10 +48,12 @@ export const DEFAULT_RECONCILIATION_SCHEDULE: ReconciliationSchedule = {
   maximumAttempts: 12,
   baseBackoffSeconds: 30,
   maximumBackoffSeconds: 3600,
+  strandedAfterSeconds: 900,
 };
 
 export interface ReconciliationDependencies {
   readonly store: ReconciliationStore;
+  readonly stranded: StrandedPaymentStore;
   readonly providers: ProviderRegistry;
   readonly schedule: ReconciliationSchedule;
   readonly now: () => Date;
@@ -87,6 +99,38 @@ export type PaymentResolution = ResolutionSubject & ResolutionOutcome;
 export interface ReconciliationRun {
   readonly claimed: number;
   readonly resolutions: readonly PaymentResolution[];
+  /**
+   * Payments abandoned mid-flight that were moved to `unknown` so the ordinary
+   * machinery can take them.
+   */
+  readonly recovered: number;
+}
+
+/**
+ * Moves payments abandoned mid-flight into `unknown`, and releases their claims.
+ *
+ * A payment in `processing` had a request sent and no answer recorded, which is
+ * precisely what `unknown` means; one in `pending` was left mid-routing. Neither
+ * is discoverable by anything else, and both hold their merchant reference and
+ * their idempotency key for as long as they sit there.
+ */
+async function recoverStrandedPayments(dependencies: ReconciliationDependencies): Promise<number> {
+  const stranded = await dependencies.stranded.findStranded(
+    dependencies.schedule.strandedAfterSeconds,
+    dependencies.schedule.batchSize,
+  );
+
+  let recovered = 0;
+  for (const payment of stranded) {
+    const isMoved = await dependencies.stranded.markUncertain(
+      payment,
+      `Abandoned in ${payment.status} with no outcome recorded, so whether the provider acted is unknown.`,
+    );
+    if (isMoved) {
+      recovered += 1;
+    }
+  }
+  return recovered;
 }
 
 /**
@@ -137,6 +181,10 @@ function transitionForObservation(observed: ObservedPaymentState):
 export async function reconcileDuePayments(
   dependencies: ReconciliationDependencies,
 ): Promise<ReconciliationRun> {
+  // First, because a payment abandoned mid-flight is not yet uncertain as far as
+  // the queue is concerned, and moving it makes it so.
+  const recovered = await recoverStrandedPayments(dependencies);
+
   const due = await dependencies.store.claimDue(
     dependencies.schedule.batchSize,
     dependencies.schedule.leaseSeconds,
@@ -147,7 +195,7 @@ export async function reconcileDuePayments(
     resolutions.push(await reconcileOne(payment, dependencies));
   }
 
-  return { claimed: due.length, resolutions };
+  return { claimed: due.length, resolutions, recovered };
 }
 
 function subjectOf(payment: DuePayment): ResolutionSubject {

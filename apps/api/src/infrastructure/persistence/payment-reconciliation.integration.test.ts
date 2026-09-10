@@ -562,3 +562,109 @@ describe('tenant isolation holds through reconciliation', () => {
     expect(ids).toContain(theirs.paymentId);
   });
 });
+
+/**
+ * Reproduces a process dying inside the provider call: the attempt is open, the
+ * payment is committed in `processing`, and the claim is committed in flight.
+ */
+async function abandonedInProcessing(): Promise<{
+  paymentId: string;
+  command: CreatePaymentCommand;
+}> {
+  const command = commandFor();
+  const created = await fixture.payments.createPayment(command);
+  if (created.kind !== 'created') {
+    throw new Error(`expected a fresh payment, got ${created.kind}`);
+  }
+  await fixture.payments.openAttempt({
+    organizationId: command.organizationId,
+    paymentId: created.paymentId,
+    attemptNumber: 1,
+    providerCode: 'appmax',
+  });
+
+  // Age it past the staleness threshold rather than waiting, so the test is
+  // deterministic instead of slow and occasionally wrong. The touch trigger is
+  // suspended for the update, because it would otherwise reset the very column
+  // being aged.
+  await fixture.ownerPool.query('ALTER TABLE payments DISABLE TRIGGER payments_touch_updated_at');
+  await fixture.ownerPool.query(
+    // Far older than anything else the suite leaves behind, because the sweep
+    // takes the oldest first and a shared database is not an empty one.
+    "UPDATE payments SET updated_at = now() - interval '10 years' WHERE id = $1",
+    [created.paymentId],
+  );
+  await fixture.ownerPool.query('ALTER TABLE payments ENABLE TRIGGER payments_touch_updated_at');
+
+  return { paymentId: created.paymentId, command };
+}
+
+describe('a payment abandoned mid-flight', () => {
+  it('is discovered, moved to unknown, and its claim released', async () => {
+    // Before this existed, nothing could discover such a payment: reconciliation
+    // scans `unknown` only, so both the key and the merchant reference were held
+    // permanently and only manual SQL cleared either.
+    const abandoned = await abandonedInProcessing();
+
+    const stranded = await fixture.reconciliation.findStranded(60, 50);
+    const mine = stranded.find((payment) => payment.paymentId === abandoned.paymentId);
+    expect(mine).toBeDefined();
+    expect(mine?.status).toBe('processing');
+    expect(mine?.idempotencyKey).toBe(abandoned.command.idempotencyKey);
+
+    expect(await fixture.reconciliation.markUncertain(mine!, 'abandoned mid-flight')).toBe(true);
+
+    const payment = await readPayment(abandoned.paymentId);
+    expect(payment.status).toBe('unknown');
+    // The scheduling trigger picks it up from here, with no separate enqueue.
+    expect(payment.reconciliation_due_at).not.toBeNull();
+  });
+
+  it('lets the merchant retry the key and learn the payment is uncertain', async () => {
+    const abandoned = await abandonedInProcessing();
+    const stranded = await fixture.reconciliation.findStranded(60, 50);
+    const mine = stranded.find((payment) => payment.paymentId === abandoned.paymentId);
+    await fixture.reconciliation.markUncertain(mine!, 'abandoned mid-flight');
+
+    // The identical request, byte for byte. A retry that differed would be a
+    // conflict, and correctly so.
+    const replayed = await fixture.payments.createPayment(abandoned.command);
+
+    // Not 409 forever. The caller received nothing, because the process handling
+    // their request died, so the claim replays what the payment now is.
+    expect(replayed.kind).toBe('replayed');
+    if (replayed.kind !== 'replayed') {
+      throw new Error('expected a replay');
+    }
+    expect(replayed.responseStatus).toBe(202);
+  });
+
+  it('does not sweep a payment that is merely recent', async () => {
+    // A payment still being worked on must never be moved out from under the
+    // request working on it.
+    const command = commandFor();
+    const created = await fixture.payments.createPayment(command);
+    if (created.kind !== 'created') {
+      throw new Error('expected a fresh payment');
+    }
+    await fixture.payments.openAttempt({
+      organizationId: command.organizationId,
+      paymentId: created.paymentId,
+      attemptNumber: 1,
+      providerCode: 'appmax',
+    });
+
+    const stranded = await fixture.reconciliation.findStranded(3600, 50);
+    expect(stranded.map((payment) => payment.paymentId)).not.toContain(created.paymentId);
+  });
+
+  it('reports false for a payment that moved on before it was marked', async () => {
+    const abandoned = await abandonedInProcessing();
+    const stranded = await fixture.reconciliation.findStranded(60, 50);
+    const mine = stranded.find((payment) => payment.paymentId === abandoned.paymentId);
+
+    expect(await fixture.reconciliation.markUncertain(mine!, 'first')).toBe(true);
+    // Idempotent: the second sweep of the same payment changes nothing.
+    expect(await fixture.reconciliation.markUncertain(mine!, 'second')).toBe(false);
+  });
+});

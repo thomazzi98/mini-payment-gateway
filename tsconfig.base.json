@@ -1,8 +1,11 @@
 {
   "$schema": "https://json.schemastore.org/tsconfig",
   "compilerOptions": {
-    "target": "ES2023",
-    "lib": ["ES2023"],
+    // Matches the runtime rather than trailing it. Everything runs on Node 24,
+    // which implements ES2024 in full, and declaring less meant the compiler
+    // denied the existence of methods the runtime has and the linter recommends.
+    "target": "ES2024",
+    "lib": ["ES2024"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "moduleDetection": "force",

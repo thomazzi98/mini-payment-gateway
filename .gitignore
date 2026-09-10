@@ -12,6 +12,10 @@ out/
 
 # test output
 coverage/
+
+# Vitest writes its reporter output and module cache here.
+.vitest/
+**/.vitest
 test-results/
 playwright-report/
 blob-report/

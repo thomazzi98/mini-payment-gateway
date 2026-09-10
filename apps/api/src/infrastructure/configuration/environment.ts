@@ -47,6 +47,10 @@ const environmentSchema = baseEnvironmentSchema.extend({
   // delay a payment noticeably. It is a lease, never a lock.
   RECONCILIATION_LEASE_SECONDS: z.coerce.number().int().min(5).max(3600).default(120),
   RECONCILIATION_MAXIMUM_ATTEMPTS: z.coerce.number().int().min(1).max(100).default(12),
+  // How long a payment may sit mid-flight before it is treated as abandoned.
+  // Generous by default: sweeping one that is merely slow would move it out from
+  // under the request still working on it.
+  RECONCILIATION_STRANDED_AFTER_SECONDS: z.coerce.number().int().min(60).default(900),
 });
 
 export type Environment = z.infer<typeof environmentSchema>;

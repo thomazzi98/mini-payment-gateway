@@ -41,6 +41,12 @@ export class ReconciliationWorker {
     const startedAt = process.hrtime.bigint();
     try {
       const run = await reconcileDuePayments(this.dependencies);
+      if (run.recovered > 0) {
+        this.logger.warn(
+          { recovered: run.recovered },
+          'payments abandoned mid-flight were moved to unknown for reconciliation',
+        );
+      }
       if (run.claimed === 0) {
         return;
       }

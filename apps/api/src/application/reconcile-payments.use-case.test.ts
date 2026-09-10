@@ -107,6 +107,11 @@ function dependenciesFor(
 ): ReconciliationDependencies {
   return {
     store,
+    // Nothing is stranded in these tests; recovery has its own.
+    stranded: {
+      findStranded: () => Promise.resolve([]),
+      markUncertain: () => Promise.resolve(true),
+    },
     providers: new ProviderRegistry([{ descriptor, environment: 'SANDBOX', pix, priority: 1 }]),
     schedule: DEFAULT_RECONCILIATION_SCHEDULE,
     now: () => NOW,
@@ -323,5 +328,88 @@ describe('scheduling', () => {
     expect(run.claimed).toBe(0);
     expect(store.calls.applied).toHaveLength(0);
     expect(store.calls.deferred).toHaveLength(0);
+  });
+});
+
+describe('recovering a payment abandoned mid-flight', () => {
+  function strandedFixture(status: 'processing' | 'pending', key: string | undefined) {
+    const marked: { paymentId: string; reason: string }[] = [];
+    const dependencies = {
+      ...dependenciesFor(storeFor([]), observing('paid')),
+      stranded: {
+        findStranded: () =>
+          Promise.resolve([
+            {
+              paymentId: 'internal-9',
+              organizationId: 'organization-1',
+              publicId: 'pay_0123456789abcdefghjkmnpqrs',
+              environment: 'SANDBOX' as const,
+              status,
+              currency: 'BRL',
+              expectedAmountMinor: 10_000n,
+              merchantReference: 'order-9',
+              idempotencyKey: key,
+            },
+          ]),
+        markUncertain: (payment: { paymentId: string }, reason: string) => {
+          marked.push({ paymentId: payment.paymentId, reason });
+          return Promise.resolve(true);
+        },
+      },
+    };
+    return { dependencies, marked };
+  }
+
+  it.each(['processing', 'pending'] as const)(
+    'moves a payment abandoned in %s to unknown',
+    async (status) => {
+      // Nothing else can discover it, and while it sits there it holds both its
+      // merchant reference and its idempotency key.
+      const { dependencies, marked } = strandedFixture(status, 'key-9');
+      const run = await reconcileDuePayments(dependencies);
+
+      expect(run.recovered).toBe(1);
+      expect(marked[0]?.paymentId).toBe('internal-9');
+      expect(marked[0]?.reason).toContain(status);
+    },
+  );
+
+  it('recovers a payment that never had an idempotency key', async () => {
+    const { dependencies, marked } = strandedFixture('processing', undefined);
+    const run = await reconcileDuePayments(dependencies);
+
+    expect(run.recovered).toBe(1);
+    expect(marked).toHaveLength(1);
+  });
+
+  it('does not count a payment that moved on by itself', async () => {
+    const dependencies = {
+      ...dependenciesFor(storeFor([]), observing('paid')),
+      stranded: {
+        findStranded: () =>
+          Promise.resolve([
+            {
+              paymentId: 'internal-9',
+              organizationId: 'organization-1',
+              publicId: 'pay_0123456789abcdefghjkmnpqrs',
+              environment: 'SANDBOX' as const,
+              status: 'processing',
+              currency: 'BRL',
+              expectedAmountMinor: 10_000n,
+              merchantReference: 'order-9',
+              idempotencyKey: 'key-9',
+            },
+          ]),
+        markUncertain: () => Promise.resolve(false),
+      },
+    };
+
+    const run = await reconcileDuePayments(dependencies);
+    expect(run.recovered).toBe(0);
+  });
+
+  it('reports nothing recovered when nothing is stranded', async () => {
+    const run = await reconcileDuePayments(dependenciesFor(storeFor([]), observing('paid')));
+    expect(run.recovered).toBe(0);
   });
 });

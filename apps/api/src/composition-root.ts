@@ -116,12 +116,14 @@ export function buildApplicationContext(): ApplicationContext {
   const reconciliationRepository = new PaymentReconciliationRepository(pool);
   const reconciliation: ReconciliationDependencies = {
     store: reconciliationRepository,
+    stranded: reconciliationRepository,
     providers,
     schedule: {
       ...DEFAULT_RECONCILIATION_SCHEDULE,
       batchSize: environment.RECONCILIATION_BATCH_SIZE,
       leaseSeconds: environment.RECONCILIATION_LEASE_SECONDS,
       maximumAttempts: environment.RECONCILIATION_MAXIMUM_ATTEMPTS,
+      strandedAfterSeconds: environment.RECONCILIATION_STRANDED_AFTER_SECONDS,
     },
     now: () => new Date(),
   };

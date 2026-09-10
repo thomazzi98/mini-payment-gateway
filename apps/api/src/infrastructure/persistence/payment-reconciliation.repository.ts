@@ -1,8 +1,11 @@
 import type { Pool } from 'pg';
+import { completeIdempotencyRecord } from './complete-idempotency-record.js';
 import { movePaymentStatus } from './payment-status-move.js';
 import type {
   DuePayment,
   ReconciliationStore,
+  StrandedPayment,
+  StrandedPaymentStore,
 } from '../../application/ports/payment-reconciliation.repository.js';
 
 /**
@@ -31,7 +34,7 @@ interface DueRow {
   readonly attempt_id: string | null;
 }
 
-export class PaymentReconciliationRepository implements ReconciliationStore {
+export class PaymentReconciliationRepository implements ReconciliationStore, StrandedPaymentStore {
   public constructor(private readonly pool: Pool) {}
 
   /**
@@ -145,6 +148,110 @@ export class PaymentReconciliationRepository implements ReconciliationStore {
         [paymentId, dueAt ?? null, note],
       );
       await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Payments abandoned mid-flight, in `processing` or `pending` with nothing
+   * working on them any more.
+   */
+  public async findStranded(olderThanSeconds: number, limit: number): Promise<StrandedPayment[]> {
+    const found = await this.pool.query<{
+      id: string;
+      organization_id: string;
+      public_id: string;
+      environment: 'SANDBOX' | 'PRODUCTION';
+      status: string;
+      currency: string;
+      expected_amount_minor: string;
+      merchant_reference: string;
+      idempotency_key: string | null;
+    }>('SELECT * FROM find_stranded_payments($1, $2)', [olderThanSeconds, limit]);
+
+    return found.rows.map((row) => ({
+      paymentId: row.id,
+      organizationId: row.organization_id,
+      publicId: row.public_id,
+      environment: row.environment,
+      status: row.status,
+      currency: row.currency,
+      expectedAmountMinor: BigInt(row.expected_amount_minor),
+      merchantReference: row.merchant_reference,
+      idempotencyKey: row.idempotency_key ?? undefined,
+    }));
+  }
+
+  /**
+   * Moves an abandoned payment to `unknown` and releases its claim together.
+   *
+   * The claim is completed with what the payment now is rather than with what the
+   * caller received, because the caller received nothing: the process handling
+   * their request died. A retry of that key then learns the payment exists and is
+   * uncertain, which is both true and actionable, instead of being told forever
+   * that something is still being processed.
+   */
+  public async markUncertain(payment: StrandedPayment, reason: string): Promise<boolean> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT set_config($1, $2, true)', [
+        'app.organization_id',
+        payment.organizationId,
+      ]);
+
+      const current = await client.query<{ status: string }>(
+        'SELECT status FROM payments WHERE id = $1 FOR UPDATE',
+        [payment.paymentId],
+      );
+      const status = current.rows[0]?.status;
+      if (status !== 'processing' && status !== 'pending') {
+        // It moved on by itself while we were looking. Nothing to recover.
+        await client.query('COMMIT');
+        return false;
+      }
+
+      await movePaymentStatus(client, {
+        paymentId: payment.paymentId,
+        organizationId: payment.organizationId,
+        toStatus: 'unknown',
+        trigger: 'PROVIDER_OUTCOME_UNKNOWN',
+        // Internal, and correctly so: nobody read a provider. What is being
+        // recorded is our own ignorance, which is exactly what `unknown` is for.
+        evidenceClass: 'internal',
+        attemptId: null,
+        reason,
+      });
+
+      await client.query('UPDATE payments SET reconciliation_note = $2 WHERE id = $1', [
+        payment.paymentId,
+        reason,
+      ]);
+
+      if (payment.idempotencyKey !== undefined) {
+        await completeIdempotencyRecord(client, {
+          organizationId: payment.organizationId,
+          environment: payment.environment,
+          idempotencyKey: payment.idempotencyKey,
+          responseStatus: 202,
+          responseBody: {
+            id: payment.publicId,
+            status: 'unknown',
+            amountMinor: payment.expectedAmountMinor.toString(),
+            currency: payment.currency,
+            merchantReference: payment.merchantReference,
+            failureCode: 'provider_outcome_unknown',
+            failureReason: reason,
+          },
+        });
+      }
+
+      await client.query('COMMIT');
+      return true;
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;

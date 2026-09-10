@@ -23,7 +23,9 @@ try {
     port: context.environment.HTTP_PORT,
   });
 } catch (error) {
-  context.logger.fatal({ error }, 'failed to start the http server');
+  // `err`, not `error`: pino serializes the former and renders the latter as {},
+  // so the message and stack of the one error that matters most were lost.
+  context.logger.fatal({ err: error }, 'failed to start the http server');
   await context.shutdown();
   process.exit(1);
 }

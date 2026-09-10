@@ -32,6 +32,10 @@ function workerOver(
       applyResolution: () => Promise.resolve('applied' as const),
       deferResolution: () => Promise.resolve(),
     },
+    stranded: {
+      findStranded: () => Promise.resolve([]),
+      markUncertain: () => Promise.resolve(true),
+    },
     providers: new ProviderRegistry([]),
     schedule: DEFAULT_RECONCILIATION_SCHEDULE,
     now: () => new Date('2026-09-09T12:00:00.000Z'),
@@ -65,28 +69,27 @@ describe('the reconciliation loop', () => {
   });
 
   it('stops after finishing the batch in flight rather than abandoning it', async () => {
-    let resolveBatch: (() => void) | undefined;
     let isFinished = false;
 
-    const { worker } = workerOver(
-      () =>
-        new Promise((resolve) => {
-          resolveBatch = () => {
-            isFinished = true;
-            resolve([]);
-          };
-        }),
-      10,
-    );
+    // An explicit barrier rather than a count of microtask ticks: the number of
+    // awaits before the claim is an implementation detail, and a test that
+    // depends on it breaks the moment a step is added ahead of it.
+    const started = Promise.withResolvers<void>();
+    const batch = Promise.withResolvers<DuePayment[]>();
+
+    const { worker } = workerOver(() => {
+      started.resolve();
+      return batch.promise;
+    }, 10);
 
     const running = worker.run();
-    // Let the first batch start before asking the worker to stop.
-    await Promise.resolve();
+    await started.promise;
 
     const stopping = worker.stop();
     expect(isFinished).toBe(false);
 
-    resolveBatch?.();
+    isFinished = true;
+    batch.resolve([]);
     await stopping;
     await running;
 

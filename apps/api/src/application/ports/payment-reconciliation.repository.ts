@@ -38,3 +38,32 @@ export interface ReconciliationStore {
     dueAt: Date | undefined,
   ): Promise<void>;
 }
+
+/**
+ * A payment abandoned mid-flight: a request was sent and no answer was recorded.
+ */
+export interface StrandedPayment {
+  readonly paymentId: string;
+  readonly organizationId: string;
+  readonly publicId: string;
+  readonly environment: 'SANDBOX' | 'PRODUCTION';
+  readonly status: string;
+  readonly currency: string;
+  readonly expectedAmountMinor: bigint;
+  readonly merchantReference: string;
+  /**
+   * The claim still held open on this payment's behalf, if any. Releasing it is
+   * the point of the sweep: left in flight it answers every retry of that key
+   * with "still being processed" and then "stranded", forever.
+   */
+  readonly idempotencyKey: string | undefined;
+}
+
+export interface StrandedPaymentStore {
+  findStranded(olderThanSeconds: number, limit: number): Promise<StrandedPayment[]>;
+  /**
+   * Moves the payment to `unknown` and completes its claim, in one transaction.
+   * Returns false when the payment moved on by itself in the meantime.
+   */
+  markUncertain(payment: StrandedPayment, reason: string): Promise<boolean>;
+}

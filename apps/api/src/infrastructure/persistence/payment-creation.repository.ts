@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from 'pg';
 import { generatePublicIdentifier } from '@gateway/shared';
+import { completeIdempotencyRecord } from './complete-idempotency-record.js';
 import { movePaymentStatus } from './payment-status-move.js';
 import {
   decideForExistingRecord,
@@ -124,6 +125,28 @@ export class PaymentCreationRepository {
   ): Promise<CreatePaymentResult> {
     const fingerprint = fingerprintRequest(command.requestPath, command.requestBody);
 
+    // Checked before the key is claimed, not after. Refusing afterwards left the
+    // claim committed against a request that never became a payment, so the key
+    // was consumed and every retry of it was answered "still being processed"
+    // and then "stranded", forever.
+    //
+    // Still inside the transaction, so a ceiling changed concurrently cannot be
+    // read before the change and applied after it. The trigger on payments
+    // enforces the same rule; this exists so a merchant over the limit is told
+    // so rather than meeting a database exception.
+    const ceiling = await client.query<{ maximum_payment_amount_minor: string }>(
+      'SELECT maximum_payment_amount_minor FROM organizations WHERE id = $1',
+      [command.organizationId],
+    );
+    const ceilingRow = ceiling.rows[0];
+    if (ceilingRow === undefined) {
+      throw new Error('the organization creating a payment does not exist');
+    }
+    const maximumAmountMinor = BigInt(ceilingRow.maximum_payment_amount_minor);
+    if (command.expectedAmountMinor > maximumAmountMinor) {
+      return { kind: 'amount_exceeds_limit', maximumAmountMinor };
+    }
+
     const claim = await client.query<{ id: string }>(
       `INSERT INTO idempotency_records
          (organization_id, environment, idempotency_key, request_fingerprint, request_path, state)
@@ -142,23 +165,6 @@ export class PaymentCreationRepository {
     const claimedRecordId = claim.rows[0]?.id;
     if (claimedRecordId === undefined) {
       return this.decideForClaimHeldByAnother(client, command, fingerprint);
-    }
-
-    // Read inside the claim transaction, so a ceiling changed concurrently cannot
-    // be read before the change and applied after it. The trigger on payments
-    // enforces the same rule; this exists so a merchant over the limit is told so
-    // rather than meeting a database exception.
-    const ceiling = await client.query<{ maximum_payment_amount_minor: string }>(
-      'SELECT maximum_payment_amount_minor FROM organizations WHERE id = $1',
-      [command.organizationId],
-    );
-    const ceilingRow = ceiling.rows[0];
-    if (ceilingRow === undefined) {
-      throw new Error('the organization creating a payment does not exist');
-    }
-    const maximumAmountMinor = BigInt(ceilingRow.maximum_payment_amount_minor);
-    if (command.expectedAmountMinor > maximumAmountMinor) {
-      return { kind: 'amount_exceeds_limit', maximumAmountMinor };
     }
 
     const publicId = generatePublicIdentifier('payment');
@@ -245,31 +251,6 @@ export class PaymentCreationRepository {
     return { kind: 'in_flight' };
   }
 
-  private async completeIdempotencyRecord(
-    client: PoolClient,
-    command: {
-      readonly organizationId: string;
-      readonly environment: 'SANDBOX' | 'PRODUCTION';
-      readonly idempotencyKey: string;
-      readonly responseStatus: number;
-      readonly responseBody: unknown;
-    },
-  ): Promise<void> {
-    await client.query(
-      `UPDATE idempotency_records
-          SET state = 'completed', response_status = $4, response_body = $5,
-              completed_at = now()
-        WHERE organization_id = $1 AND environment = $2 AND idempotency_key = $3`,
-      [
-        command.organizationId,
-        command.environment,
-        command.idempotencyKey,
-        command.responseStatus,
-        JSON.stringify(command.responseBody),
-      ],
-    );
-  }
-
   /**
    * Fails a payment that never reached a provider, and releases its claim.
    *
@@ -300,7 +281,7 @@ export class PaymentCreationRepository {
         reason: command.reason,
       });
 
-      await this.completeIdempotencyRecord(client, command);
+      await completeIdempotencyRecord(client, command);
 
       await client.query('COMMIT');
     } catch (error) {
@@ -416,7 +397,7 @@ export class PaymentCreationRepository {
       });
 
       if (command.completesRequest) {
-        await this.completeIdempotencyRecord(client, command);
+        await completeIdempotencyRecord(client, command);
       }
 
       await client.query('COMMIT');
