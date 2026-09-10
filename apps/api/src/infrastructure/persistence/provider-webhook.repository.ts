@@ -40,26 +40,47 @@ export class ProviderWebhookRepository implements WebhookIngestionStore {
     readonly organizationId: string | undefined;
     readonly disposition: 'scheduled_read' | 'unmatched' | 'ignored';
   }): Promise<'recorded' | 'duplicate'> {
-    // ON CONFLICT DO NOTHING against the unique delivery index. Redelivery is the
-    // norm rather than an anomaly, so it resolves to a no-op here instead of
-    // becoming an error the route has to interpret.
-    const inserted = await this.pool.query<{ id: string }>(
-      `INSERT INTO provider_webhook_events
-         (provider_code, provider_event_id, event_type, provider_reference, payment_id, disposition)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (provider_code, provider_event_id) DO NOTHING
-       RETURNING id`,
-      [
-        event.providerCode,
-        event.providerEventId,
-        event.eventType,
-        event.providerReference ?? null,
-        event.paymentId ?? null,
-        event.disposition,
-      ],
-    );
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Scoped once the payment is known, because row level security applies to
+      // this table too: an event that names a payment may only be written by the
+      // tenant that owns it. An unmatched event names no payment and needs no
+      // scope, which is what the policy's own condition says.
+      if (event.organizationId !== undefined) {
+        await client.query('SELECT set_config($1, $2, true)', [
+          'app.organization_id',
+          event.organizationId,
+        ]);
+      }
 
-    return inserted.rows.length > 0 ? 'recorded' : 'duplicate';
+      // ON CONFLICT DO NOTHING against the unique delivery index. Redelivery is
+      // the norm rather than an anomaly, so it resolves to a no-op here instead
+      // of becoming an error the route has to interpret.
+      const inserted = await client.query<{ id: string }>(
+        `INSERT INTO provider_webhook_events
+           (provider_code, provider_event_id, event_type, provider_reference, payment_id, disposition)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (provider_code, provider_event_id) DO NOTHING
+         RETURNING id`,
+        [
+          event.providerCode,
+          event.providerEventId,
+          event.eventType,
+          event.providerReference ?? null,
+          event.paymentId ?? null,
+          event.disposition,
+        ],
+      );
+
+      await client.query('COMMIT');
+      return inserted.rows.length > 0 ? 'recorded' : 'duplicate';
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   public async bringInquiryForward(paymentId: string, organizationId: string): Promise<void> {

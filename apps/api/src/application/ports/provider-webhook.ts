@@ -12,7 +12,7 @@
  * transport.
  */
 
-export interface ProviderWebhookEvent {
+interface ProviderWebhookEvent {
   /**
    * Identifies this delivery, so a repeat is a repeat.
    *
