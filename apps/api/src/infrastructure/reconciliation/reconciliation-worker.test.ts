@@ -34,7 +34,7 @@ function workerOver(
     },
     stranded: {
       findStranded: () => Promise.resolve([]),
-      markUncertain: () => Promise.resolve(true),
+      recoverAbandoned: () => Promise.resolve(true),
     },
     providers: new ProviderRegistry([]),
     schedule: DEFAULT_RECONCILIATION_SCHEDULE,

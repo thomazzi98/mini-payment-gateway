@@ -110,7 +110,7 @@ function dependenciesFor(
     // Nothing is stranded in these tests; recovery has its own.
     stranded: {
       findStranded: () => Promise.resolve([]),
-      markUncertain: () => Promise.resolve(true),
+      recoverAbandoned: () => Promise.resolve(true),
     },
     providers: new ProviderRegistry([{ descriptor, environment: 'SANDBOX', pix, priority: 1 }]),
     schedule: DEFAULT_RECONCILIATION_SCHEDULE,
@@ -351,7 +351,7 @@ describe('recovering a payment abandoned mid-flight', () => {
               idempotencyKey: key,
             },
           ]),
-        markUncertain: (payment: { paymentId: string }, reason: string) => {
+        recoverAbandoned: (payment: { paymentId: string }, reason: string) => {
           marked.push({ paymentId: payment.paymentId, reason });
           return Promise.resolve(true);
         },
@@ -361,10 +361,12 @@ describe('recovering a payment abandoned mid-flight', () => {
   }
 
   it.each(['processing', 'pending'] as const)(
-    'moves a payment abandoned in %s to unknown',
+    'closes a payment abandoned in %s',
     async (status) => {
       // Nothing else can discover it, and while it sits there it holds both its
-      // merchant reference and its idempotency key.
+      // merchant reference and its idempotency key. Where it goes depends on the
+      // status it was abandoned in, and that decision belongs to the adapter,
+      // which the integration tests cover against the real transition table.
       const { dependencies, marked } = strandedFixture(status, 'key-9');
       const run = await reconcileDuePayments(dependencies);
 
@@ -400,7 +402,7 @@ describe('recovering a payment abandoned mid-flight', () => {
               idempotencyKey: 'key-9',
             },
           ]),
-        markUncertain: () => Promise.resolve(false),
+        recoverAbandoned: () => Promise.resolve(false),
       },
     };
 
@@ -411,5 +413,60 @@ describe('recovering a payment abandoned mid-flight', () => {
   it('reports nothing recovered when nothing is stranded', async () => {
     const run = await reconcileDuePayments(dependenciesFor(storeFor([]), observing('paid')));
     expect(run.recovered).toBe(0);
+  });
+});
+
+describe('one payment the database refuses does not stop the batch', () => {
+  it('skips a payment that cannot be recovered and keeps going', async () => {
+    // Otherwise a single row with inconsistent history fails every batch forever
+    // and stops reconciliation for every other merchant.
+    const reported: string[] = [];
+    const strandedPayments = ['bad', 'good'].map((suffix) => ({
+      paymentId: `internal-${suffix}`,
+      organizationId: 'organization-1',
+      publicId: 'pay_0123456789abcdefghjkmnpqrs',
+      environment: 'SANDBOX' as const,
+      status: 'processing',
+      currency: 'BRL',
+      expectedAmountMinor: 10_000n,
+      merchantReference: `order-${suffix}`,
+      idempotencyKey: `key-${suffix}`,
+    }));
+
+    const dependencies = {
+      ...dependenciesFor(storeFor([]), observing('paid')),
+      stranded: {
+        findStranded: () => Promise.resolve(strandedPayments),
+        recoverAbandoned: (payment: { paymentId: string }) =>
+          payment.paymentId === 'internal-bad'
+            ? Promise.reject(new Error('duplicate key value violates transitions_sequence_unique'))
+            : Promise.resolve(true),
+      },
+      onPaymentError: (paymentId: string) => {
+        reported.push(paymentId);
+      },
+    };
+
+    const run = await reconcileDuePayments(dependencies);
+
+    expect(run.recovered).toBe(1);
+    expect(run.failed).toBe(1);
+    expect(reported).toEqual(['internal-bad']);
+  });
+
+  it('skips a payment whose resolution raises, leaving it leased to return later', async () => {
+    const store = storeFor([DUE]);
+    const dependencies = {
+      ...dependenciesFor(store, observing('paid')),
+      store: {
+        ...store,
+        applyResolution: () => Promise.reject(new Error('the connection went away')),
+      },
+    };
+
+    const run = await reconcileDuePayments(dependencies);
+
+    expect(run.failed).toBe(1);
+    expect(run.resolutions).toHaveLength(0);
   });
 });

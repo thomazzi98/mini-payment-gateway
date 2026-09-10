@@ -44,7 +44,13 @@ export class ReconciliationWorker {
       if (run.recovered > 0) {
         this.logger.warn(
           { recovered: run.recovered },
-          'payments abandoned mid-flight were moved to unknown for reconciliation',
+          'payments abandoned mid-flight were closed so reconciliation can take them',
+        );
+      }
+      if (run.failed > 0) {
+        this.logger.error(
+          { failed: run.failed },
+          'payments this batch could not act on; they are skipped, not lost',
         );
       }
       if (run.claimed === 0) {

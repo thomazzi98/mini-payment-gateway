@@ -564,6 +564,23 @@ describe('tenant isolation holds through reconciliation', () => {
 });
 
 /**
+ * Ages a payment past the staleness threshold rather than waiting, so the tests
+ * are deterministic instead of slow and occasionally wrong.
+ *
+ * Far older than anything else the suite leaves behind, because the sweep takes
+ * the oldest first and a shared database is not an empty one. The touch trigger is
+ * suspended, because it would otherwise reset the very column being aged.
+ */
+async function ageOut(paymentId: string): Promise<void> {
+  await fixture.ownerPool.query('ALTER TABLE payments DISABLE TRIGGER payments_touch_updated_at');
+  await fixture.ownerPool.query(
+    "UPDATE payments SET updated_at = now() - interval '10 years' WHERE id = $1",
+    [paymentId],
+  );
+  await fixture.ownerPool.query('ALTER TABLE payments ENABLE TRIGGER payments_touch_updated_at');
+}
+
+/**
  * Reproduces a process dying inside the provider call: the attempt is open, the
  * payment is committed in `processing`, and the claim is committed in flight.
  */
@@ -583,19 +600,22 @@ async function abandonedInProcessing(): Promise<{
     providerCode: 'appmax',
   });
 
-  // Age it past the staleness threshold rather than waiting, so the test is
-  // deterministic instead of slow and occasionally wrong. The touch trigger is
-  // suspended for the update, because it would otherwise reset the very column
-  // being aged.
-  await fixture.ownerPool.query('ALTER TABLE payments DISABLE TRIGGER payments_touch_updated_at');
-  await fixture.ownerPool.query(
-    // Far older than anything else the suite leaves behind, because the sweep
-    // takes the oldest first and a shared database is not an empty one.
-    "UPDATE payments SET updated_at = now() - interval '10 years' WHERE id = $1",
-    [created.paymentId],
-  );
-  await fixture.ownerPool.query('ALTER TABLE payments ENABLE TRIGGER payments_touch_updated_at');
+  await ageOut(created.paymentId);
 
+  return { paymentId: created.paymentId, command };
+}
+
+/**
+ * A payment abandoned before any provider was contacted: created and never
+ * dispatched. Nothing was sent, so nothing can exist at a provider.
+ */
+async function abandonedInPending(): Promise<{ paymentId: string; command: CreatePaymentCommand }> {
+  const command = commandFor();
+  const created = await fixture.payments.createPayment(command);
+  if (created.kind !== 'created') {
+    throw new Error(`expected a fresh payment, got ${created.kind}`);
+  }
+  await ageOut(created.paymentId);
   return { paymentId: created.paymentId, command };
 }
 
@@ -612,7 +632,7 @@ describe('a payment abandoned mid-flight', () => {
     expect(mine?.status).toBe('processing');
     expect(mine?.idempotencyKey).toBe(abandoned.command.idempotencyKey);
 
-    expect(await fixture.reconciliation.markUncertain(mine!, 'abandoned mid-flight')).toBe(true);
+    expect(await fixture.reconciliation.recoverAbandoned(mine!, 'abandoned mid-flight')).toBe(true);
 
     const payment = await readPayment(abandoned.paymentId);
     expect(payment.status).toBe('unknown');
@@ -624,7 +644,7 @@ describe('a payment abandoned mid-flight', () => {
     const abandoned = await abandonedInProcessing();
     const stranded = await fixture.reconciliation.findStranded(60, 50);
     const mine = stranded.find((payment) => payment.paymentId === abandoned.paymentId);
-    await fixture.reconciliation.markUncertain(mine!, 'abandoned mid-flight');
+    await fixture.reconciliation.recoverAbandoned(mine!, 'abandoned mid-flight');
 
     // The identical request, byte for byte. A retry that differed would be a
     // conflict, and correctly so.
@@ -637,6 +657,36 @@ describe('a payment abandoned mid-flight', () => {
       throw new Error('expected a replay');
     }
     expect(replayed.responseStatus).toBe(202);
+  });
+
+  it('closes a payment abandoned in pending as failed, not as uncertain', async () => {
+    // pending means nothing was sent, or a provider confirmed it created nothing.
+    // Either way no payable artefact exists, so calling it unknown would claim an
+    // ignorance we do not have — and the transition table has no pending-to-unknown
+    // edge, so the attempt is refused outright.
+    const abandoned = await abandonedInPending();
+
+    const stranded = await fixture.reconciliation.findStranded(60, 50);
+    const mine = stranded.find((payment) => payment.paymentId === abandoned.paymentId);
+    expect(mine?.status).toBe('pending');
+
+    expect(await fixture.reconciliation.recoverAbandoned(mine!, 'abandoned')).toBe(true);
+
+    const payment = await readPayment(abandoned.paymentId);
+    expect(payment.status).toBe('failed');
+
+    const transitions = await fixture.ownerPool.query<{ trigger_name: string }>(
+      `SELECT trigger_name FROM payment_status_transitions
+        WHERE payment_id = $1 ORDER BY sequence_number DESC LIMIT 1`,
+      [abandoned.paymentId],
+    );
+    expect(transitions.rows[0]?.trigger_name).toBe('ROUTING_EXHAUSTED');
+
+    // The reference is free again, because the payment is finished.
+    const retried = await fixture.payments.createPayment(
+      commandFor({ merchantReference: abandoned.command.merchantReference }),
+    );
+    expect(retried.kind).toBe('created');
   });
 
   it('does not sweep a payment that is merely recent', async () => {
@@ -663,8 +713,8 @@ describe('a payment abandoned mid-flight', () => {
     const stranded = await fixture.reconciliation.findStranded(60, 50);
     const mine = stranded.find((payment) => payment.paymentId === abandoned.paymentId);
 
-    expect(await fixture.reconciliation.markUncertain(mine!, 'first')).toBe(true);
+    expect(await fixture.reconciliation.recoverAbandoned(mine!, 'first')).toBe(true);
     // Idempotent: the second sweep of the same payment changes nothing.
-    expect(await fixture.reconciliation.markUncertain(mine!, 'second')).toBe(false);
+    expect(await fixture.reconciliation.recoverAbandoned(mine!, 'second')).toBe(false);
   });
 });

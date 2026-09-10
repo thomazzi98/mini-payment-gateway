@@ -126,6 +126,9 @@ export function buildApplicationContext(): ApplicationContext {
       strandedAfterSeconds: environment.RECONCILIATION_STRANDED_AFTER_SECONDS,
     },
     now: () => new Date(),
+    onPaymentError: (paymentId, error) => {
+      logger.error({ err: error, paymentId }, 'reconciliation could not act on a payment');
+    },
   };
 
   return {

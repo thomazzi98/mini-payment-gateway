@@ -62,8 +62,11 @@ export interface StrandedPayment {
 export interface StrandedPaymentStore {
   findStranded(olderThanSeconds: number, limit: number): Promise<StrandedPayment[]>;
   /**
-   * Moves the payment to `unknown` and completes its claim, in one transaction.
-   * Returns false when the payment moved on by itself in the meantime.
+   * Closes an abandoned payment and completes its claim, in one transaction.
+   *
+   * Where it goes depends on where it was abandoned, and the two are genuinely
+   * different: see the adapter. Returns false when the payment moved on by itself
+   * in the meantime.
    */
-  markUncertain(payment: StrandedPayment, reason: string): Promise<boolean>;
+  recoverAbandoned(payment: StrandedPayment, reason: string): Promise<boolean>;
 }

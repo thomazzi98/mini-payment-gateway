@@ -57,6 +57,11 @@ export interface ReconciliationDependencies {
   readonly providers: ProviderRegistry;
   readonly schedule: ReconciliationSchedule;
   readonly now: () => Date;
+  /**
+   * Reports a payment this batch could not act on. Optional because the decision
+   * to continue belongs here; how loudly to say so belongs to the caller.
+   */
+  readonly onPaymentError?: (paymentId: string, error: unknown) => void;
 }
 
 /**
@@ -100,37 +105,54 @@ export interface ReconciliationRun {
   readonly claimed: number;
   readonly resolutions: readonly PaymentResolution[];
   /**
-   * Payments abandoned mid-flight that were moved to `unknown` so the ordinary
-   * machinery can take them.
+   * Payments abandoned mid-flight that were closed so the ordinary machinery can
+   * take them.
    */
   readonly recovered: number;
+  /**
+   * Payments this batch could not act on because acting on them raised. Counted
+   * rather than thrown: one payment the database refuses must not stop the batch,
+   * or a single unworkable row halts reconciliation for every other merchant.
+   */
+  readonly failed: number;
 }
 
 /**
- * Moves payments abandoned mid-flight into `unknown`, and releases their claims.
+ * Closes payments abandoned mid-flight, and releases their claims.
  *
- * A payment in `processing` had a request sent and no answer recorded, which is
- * precisely what `unknown` means; one in `pending` was left mid-routing. Neither
- * is discoverable by anything else, and both hold their merchant reference and
- * their idempotency key for as long as they sit there.
+ * Neither is discoverable by anything else, and both hold their merchant
+ * reference and their idempotency key for as long as they sit there. Where each
+ * goes is the adapter's decision, because it depends on what the status already
+ * proves about whether anything was created.
  */
-async function recoverStrandedPayments(dependencies: ReconciliationDependencies): Promise<number> {
+async function recoverStrandedPayments(
+  dependencies: ReconciliationDependencies,
+): Promise<{ recovered: number; failed: number }> {
   const stranded = await dependencies.stranded.findStranded(
     dependencies.schedule.strandedAfterSeconds,
     dependencies.schedule.batchSize,
   );
 
   let recovered = 0;
+  let failed = 0;
   for (const payment of stranded) {
-    const isMoved = await dependencies.stranded.markUncertain(
-      payment,
-      `Abandoned in ${payment.status} with no outcome recorded, so whether the provider acted is unknown.`,
-    );
-    if (isMoved) {
-      recovered += 1;
+    try {
+      const isMoved = await dependencies.stranded.recoverAbandoned(
+        payment,
+        `Abandoned in ${payment.status} with no outcome recorded.`,
+      );
+      if (isMoved) {
+        recovered += 1;
+      }
+    } catch (error) {
+      // Isolated deliberately. A payment the database will not move — a row whose
+      // history is inconsistent, say — would otherwise fail every batch forever
+      // and stop reconciliation for everyone else.
+      failed += 1;
+      dependencies.onPaymentError?.(payment.paymentId, error);
     }
   }
-  return recovered;
+  return { recovered, failed };
 }
 
 /**
@@ -191,11 +213,19 @@ export async function reconcileDuePayments(
   );
 
   const resolutions: PaymentResolution[] = [];
+  let failed = recovered.failed;
   for (const payment of due) {
-    resolutions.push(await reconcileOne(payment, dependencies));
+    try {
+      resolutions.push(await reconcileOne(payment, dependencies));
+    } catch (error) {
+      // Same isolation, same reason. The payment stays leased and becomes due
+      // again on its own, so nothing is lost by skipping it here.
+      failed += 1;
+      dependencies.onPaymentError?.(payment.paymentId, error);
+    }
   }
 
-  return { claimed: due.length, resolutions, recovered };
+  return { claimed: due.length, resolutions, recovered: recovered.recovered, failed };
 }
 
 function subjectOf(payment: DuePayment): ResolutionSubject {

@@ -187,15 +187,27 @@ export class PaymentReconciliationRepository implements ReconciliationStore, Str
   }
 
   /**
-   * Moves an abandoned payment to `unknown` and releases its claim together.
+   * Closes an abandoned payment and releases its claim together.
+   *
+   * Where it goes depends on where it was abandoned, and the two are not the same
+   * thing:
+   *
+   * `processing` means a request was sent and no answer was recorded, so whether
+   * anything was created is exactly what nobody knows. That is `unknown`, and
+   * reconciliation takes it from there.
+   *
+   * `pending` means nothing was sent at all, or a provider confirmed it created
+   * nothing and the payment came back to be routed again. Either way no payable
+   * artefact exists, so the honest close is `failed` through ROUTING_EXHAUSTED.
+   * Calling it `unknown` would claim an ignorance we do not have, and would put a
+   * payment into reconciliation that has nothing to reconcile.
    *
    * The claim is completed with what the payment now is rather than with what the
    * caller received, because the caller received nothing: the process handling
-   * their request died. A retry of that key then learns the payment exists and is
-   * uncertain, which is both true and actionable, instead of being told forever
-   * that something is still being processed.
+   * their request died. A retry of that key learns what became of the payment
+   * instead of being told forever that something is still being processed.
    */
-  public async markUncertain(payment: StrandedPayment, reason: string): Promise<boolean> {
+  public async recoverAbandoned(payment: StrandedPayment, reason: string): Promise<boolean> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
@@ -215,13 +227,28 @@ export class PaymentReconciliationRepository implements ReconciliationStore, Str
         return false;
       }
 
+      const destination =
+        status === 'processing'
+          ? {
+              toStatus: 'unknown',
+              trigger: 'PROVIDER_OUTCOME_UNKNOWN',
+              responseStatus: 202,
+              failureCode: 'provider_outcome_unknown',
+            }
+          : {
+              toStatus: 'failed',
+              trigger: 'ROUTING_EXHAUSTED',
+              responseStatus: 422,
+              failureCode: 'payment_abandoned',
+            };
+
       await movePaymentStatus(client, {
         paymentId: payment.paymentId,
         organizationId: payment.organizationId,
-        toStatus: 'unknown',
-        trigger: 'PROVIDER_OUTCOME_UNKNOWN',
-        // Internal, and correctly so: nobody read a provider. What is being
-        // recorded is our own ignorance, which is exactly what `unknown` is for.
+        toStatus: destination.toStatus,
+        trigger: destination.trigger,
+        // Internal, and correctly so: nobody read a provider. What is recorded is
+        // our own account of what happened, not a claim about what they did.
         evidenceClass: 'internal',
         attemptId: null,
         reason,
@@ -237,14 +264,14 @@ export class PaymentReconciliationRepository implements ReconciliationStore, Str
           organizationId: payment.organizationId,
           environment: payment.environment,
           idempotencyKey: payment.idempotencyKey,
-          responseStatus: 202,
+          responseStatus: destination.responseStatus,
           responseBody: {
             id: payment.publicId,
-            status: 'unknown',
+            status: destination.toStatus,
             amountMinor: payment.expectedAmountMinor.toString(),
             currency: payment.currency,
             merchantReference: payment.merchantReference,
-            failureCode: 'provider_outcome_unknown',
+            failureCode: destination.failureCode,
             failureReason: reason,
           },
         });
