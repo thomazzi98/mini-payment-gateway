@@ -86,6 +86,7 @@ async function uncertainPayment(
     completesRequest: true,
     responseStatus: 202,
     responseBody: { id: 'pay_rendered', status: 'unknown' },
+    instrumentExpiresAt: undefined,
   });
 
   return { paymentId: created.paymentId, attemptId, providerReference };
@@ -179,7 +180,10 @@ describe('scheduling follows status rather than being remembered', () => {
     expect(inserted.rows[0]?.reconciliation_due_at).not.toBeNull();
   });
 
-  it('unschedules it the moment it stops being uncertain', async () => {
+  it('keeps scheduling a payment that becomes merely unpaid', async () => {
+    // awaiting_payment is observable too. It used to be unscheduled here, which is
+    // precisely why a payment that reached it and was then paid was seen by
+    // nothing.
     const { paymentId, attemptId } = await uncertainPayment();
 
     await fixture.reconciliation.applyResolution({
@@ -190,10 +194,34 @@ describe('scheduling follows status rather than being remembered', () => {
       trigger: 'RECONCILED_INSTRUMENT_LIVE',
       evidenceClass: 'authenticated_provider_read',
       reason: 'Provider reported pendente.',
+      providerCode: 'appmax',
+      providerReference: 'ref-for-the-event',
     });
 
     const payment = await readPayment(paymentId);
     expect(payment.status).toBe('awaiting_payment');
+    expect(payment.reconciliation_due_at).not.toBeNull();
+    // A fresh budget, because the question being asked has changed.
+    expect(payment.reconciliation_attempts).toBe(0);
+  });
+
+  it('stops scheduling once the payment is settled', async () => {
+    const { paymentId, attemptId } = await uncertainPayment();
+
+    await fixture.reconciliation.applyResolution({
+      paymentId,
+      organizationId: fixture.merchant.id,
+      attemptId,
+      toStatus: 'expired',
+      trigger: 'RECONCILED_EXPIRED',
+      evidenceClass: 'authenticated_provider_read',
+      reason: 'Provider reported cancelado.',
+      providerCode: 'appmax',
+      providerReference: 'ref-for-the-event',
+    });
+
+    const payment = await readPayment(paymentId);
+    expect(payment.status).toBe('expired');
     expect(payment.reconciliation_due_at).toBeNull();
   });
 });
@@ -279,6 +307,8 @@ describe('recording a payment as paid', () => {
       trigger: 'RECONCILED_PAID',
       evidenceClass: 'authenticated_provider_read',
       reason: 'Provider reported aprovado.',
+      providerCode: 'appmax',
+      providerReference: 'ref-for-the-event',
       capture: { amountMinor: 10_000n, paidAt },
     });
 
@@ -301,6 +331,8 @@ describe('recording a payment as paid', () => {
       trigger: 'RECONCILED_PAID',
       evidenceClass: 'authenticated_provider_read',
       reason: 'Provider reported aprovado.',
+      providerCode: 'appmax',
+      providerReference: 'ref-for-the-event',
       capture: { amountMinor: 10_000n, paidAt: new Date() },
     });
 
@@ -352,6 +384,8 @@ describe('recording a payment as paid', () => {
         trigger: 'REFUND_SETTLED',
         evidenceClass: 'authenticated_provider_read',
         reason: 'not a legal step',
+        providerCode: 'appmax',
+        providerReference: 'ref-for-the-event',
       }),
     ).rejects.toThrow();
 
@@ -371,6 +405,8 @@ describe('recording a payment as paid', () => {
         trigger: 'RECONCILED_PAID',
         evidenceClass: 'internal',
         reason: 'a webhook said so',
+        providerCode: 'appmax',
+        providerReference: 'ref-for-the-event',
         capture: { amountMinor: 10_000n, paidAt: new Date() },
       }),
     ).rejects.toThrow();
@@ -388,6 +424,8 @@ describe('resolving twice', () => {
       trigger: 'RECONCILED_EXPIRED',
       evidenceClass: 'authenticated_provider_read',
       reason: 'Provider reported expired.',
+      providerCode: 'appmax',
+      providerReference: 'ref-for-the-event',
     };
 
     expect(await fixture.reconciliation.applyResolution(resolution)).toBe('applied');
@@ -410,6 +448,8 @@ describe('resolving twice', () => {
       trigger: 'RECONCILED_EXPIRED',
       evidenceClass: 'authenticated_provider_read',
       reason: 'Provider reported expired.',
+      providerCode: 'appmax',
+      providerReference: 'ref-for-the-event',
     };
 
     const outcomes = await Promise.all([
@@ -434,6 +474,8 @@ describe('resolving twice', () => {
       trigger: 'RECONCILED_PAID',
       evidenceClass: 'authenticated_provider_read',
       reason: 'Provider reported aprovado.',
+      providerCode: 'appmax',
+      providerReference: 'ref-for-the-event',
       capture: { amountMinor: 10_000n, paidAt: new Date() },
     });
 
@@ -445,6 +487,8 @@ describe('resolving twice', () => {
       trigger: 'RECONCILED_FAILED',
       evidenceClass: 'authenticated_provider_read',
       reason: 'an older read said refused',
+      providerCode: 'appmax',
+      providerReference: 'ref-for-the-event',
     });
 
     expect(stale).toBe('already_resolved');
@@ -458,12 +502,13 @@ describe('deferring', () => {
     const { paymentId } = await uncertainPayment();
     const dueAt = new Date(Date.now() + 60_000);
 
-    await fixture.reconciliation.deferResolution(
+    await fixture.reconciliation.deferResolution({
       paymentId,
-      fixture.merchant.id,
-      'The provider could not determine the outcome.',
+      organizationId: fixture.merchant.id,
+      note: 'The provider could not determine the outcome.',
       dueAt,
-    );
+      isHealthy: false,
+    });
 
     const payment = await readPayment(paymentId);
     expect(payment.status).toBe('unknown');
@@ -473,12 +518,13 @@ describe('deferring', () => {
   it('stops scheduling without locking the payment', async () => {
     const { paymentId, attemptId } = await uncertainPayment();
 
-    await fixture.reconciliation.deferResolution(
+    await fixture.reconciliation.deferResolution({
       paymentId,
-      fixture.merchant.id,
-      'Reconciliation stopped after 12 inquiries.',
-      undefined,
-    );
+      organizationId: fixture.merchant.id,
+      note: 'Reconciliation stopped after 12 inquiries.',
+      dueAt: undefined,
+      isHealthy: false,
+    });
 
     const unscheduled = await readPayment(paymentId);
     expect(unscheduled.reconciliation_due_at).toBeNull();
@@ -496,6 +542,8 @@ describe('deferring', () => {
       trigger: 'RESOLUTION_EXHAUSTED',
       evidenceClass: 'operator',
       reason: 'closed by an operator',
+      providerCode: 'appmax',
+      providerReference: 'ref-for-the-event',
     });
     expect(outcome).toBe('applied');
   });
@@ -504,12 +552,13 @@ describe('deferring', () => {
     const { paymentId } = await uncertainPayment();
     const before = await fixture.reconciliation.countAwaitingOperator();
 
-    await fixture.reconciliation.deferResolution(
+    await fixture.reconciliation.deferResolution({
       paymentId,
-      fixture.merchant.id,
-      'stopped',
-      undefined,
-    );
+      organizationId: fixture.merchant.id,
+      note: 'stopped',
+      dueAt: undefined,
+      isHealthy: false,
+    });
 
     expect(await fixture.reconciliation.countAwaitingOperator()).toBe(before + 1);
   });
@@ -528,6 +577,8 @@ describe('tenant isolation holds through reconciliation', () => {
         trigger: 'RECONCILED_EXPIRED',
         evidenceClass: 'authenticated_provider_read',
         reason: 'not mine to resolve',
+        providerCode: 'appmax',
+        providerReference: 'ref-for-the-event',
       }),
     ).resolves.toBe('already_resolved');
 
@@ -540,12 +591,13 @@ describe('tenant isolation holds through reconciliation', () => {
     const { paymentId } = await uncertainPayment();
     const before = await readPayment(paymentId);
 
-    await fixture.reconciliation.deferResolution(
+    await fixture.reconciliation.deferResolution({
       paymentId,
-      fixture.otherMerchant.id,
-      'not mine',
-      undefined,
-    );
+      organizationId: fixture.otherMerchant.id,
+      note: 'not mine',
+      dueAt: undefined,
+      isHealthy: false,
+    });
 
     const after = await readPayment(paymentId);
     expect(after.reconciliation_due_at).toEqual(before.reconciliation_due_at);

@@ -80,6 +80,7 @@ async function completeCycle(
     completesRequest: true,
     responseStatus: outcome.responseStatus,
     responseBody: outcome.body,
+    instrumentExpiresAt: undefined,
   });
 }
 

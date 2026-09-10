@@ -26,8 +26,10 @@ interface DueRow {
   readonly id: string;
   readonly organization_id: string;
   readonly environment: 'SANDBOX' | 'PRODUCTION';
+  readonly status: 'unknown' | 'awaiting_payment';
   readonly expected_amount_minor: string;
   readonly currency: string;
+  readonly expires_at: Date | null;
   readonly reconciliation_attempts: number;
   readonly provider_code: string | null;
   readonly provider_reference: string | null;
@@ -55,8 +57,10 @@ export class PaymentReconciliationRepository implements ReconciliationStore, Str
       paymentId: row.id,
       organizationId: row.organization_id,
       environment: row.environment,
+      status: row.status,
       expectedAmountMinor: BigInt(row.expected_amount_minor),
       currency: row.currency,
+      expiresAt: row.expires_at ?? undefined,
       attempts: row.reconciliation_attempts,
       providerCode: row.provider_code ?? undefined,
       providerReference: row.provider_reference ?? undefined,
@@ -83,11 +87,26 @@ export class PaymentReconciliationRepository implements ReconciliationStore, Str
         command.organizationId,
       ]);
 
-      const current = await client.query<{ status: string }>(
-        'SELECT status FROM payments WHERE id = $1 FOR UPDATE',
+      // Both observable statuses, and only those. A payment that has moved on —
+      // resolved by another worker, or funded by a concurrent inquiry — is
+      // reported rather than transitioned a second time.
+      // Read inside the transaction, both to gate on the status and to gather what
+      // the paid event carries. Reading it beforehand would let the payment change
+      // between the read and the write, and the event would describe a payment
+      // that no longer existed in that shape.
+      const current = await client.query<{
+        status: string;
+        public_id: string;
+        environment: string;
+        currency: string;
+        merchant_reference: string;
+      }>(
+        `SELECT status, public_id, environment, currency, merchant_reference
+           FROM payments WHERE id = $1 FOR UPDATE`,
         [command.paymentId],
       );
-      if (current.rows[0]?.status !== 'unknown') {
+      const currentRow = current.rows[0];
+      if (currentRow?.status !== 'unknown' && currentRow?.status !== 'awaiting_payment') {
         await client.query('COMMIT');
         return 'already_resolved';
       }
@@ -101,6 +120,14 @@ export class PaymentReconciliationRepository implements ReconciliationStore, Str
         attemptId: command.attemptId,
         reason: command.reason,
         ...(command.capture !== undefined && { capture: command.capture }),
+        eventContext: {
+          publicId: currentRow.public_id,
+          environment: currentRow.environment,
+          currency: currentRow.currency,
+          merchantReference: currentRow.merchant_reference,
+          providerCode: command.providerCode,
+          providerReference: command.providerReference,
+        },
       });
 
       await client.query('UPDATE payments SET reconciliation_note = $2 WHERE id = $1', [
@@ -125,12 +152,13 @@ export class PaymentReconciliationRepository implements ReconciliationStore, Str
    * which is the truth, and becomes an operator's to resolve. It is not locked:
    * anything may still move it, and rescheduling is one UPDATE.
    */
-  public async deferResolution(
-    paymentId: string,
-    organizationId: string,
-    note: string,
-    dueAt: Date | undefined,
-  ): Promise<void> {
+  public async deferResolution(command: {
+    readonly paymentId: string;
+    readonly organizationId: string;
+    readonly note: string;
+    readonly dueAt: Date | undefined;
+    readonly isHealthy: boolean;
+  }): Promise<void> {
     // Tenant-scoped like every other write. Without the scope, row level security
     // matches nothing and the update silently does nothing at all, which looks
     // exactly like a payment that was rescheduled.
@@ -139,13 +167,18 @@ export class PaymentReconciliationRepository implements ReconciliationStore, Str
       await client.query('BEGIN');
       await client.query('SELECT set_config($1, $2, true)', [
         'app.organization_id',
-        organizationId,
+        command.organizationId,
       ]);
+      // The attempt budget is spent only on inquiries that told us nothing. A
+      // provider replying "not paid yet" is a working system, and charging that
+      // against the budget would abandon healthy payments to an operator.
       await client.query(
         `UPDATE payments
-            SET reconciliation_due_at = $2, reconciliation_note = $3
-          WHERE id = $1 AND status = 'unknown'`,
-        [paymentId, dueAt ?? null, note],
+            SET reconciliation_due_at = $2,
+                reconciliation_note = $3,
+                reconciliation_attempts = CASE WHEN $4 THEN 0 ELSE reconciliation_attempts END
+          WHERE id = $1 AND status IN ('unknown', 'awaiting_payment')`,
+        [command.paymentId, command.dueAt ?? null, command.note, command.isHealthy],
       );
       await client.query('COMMIT');
     } catch (error) {

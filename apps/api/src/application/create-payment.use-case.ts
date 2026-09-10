@@ -92,6 +92,7 @@ export interface PaymentCreationStore {
     readonly completesRequest: boolean;
     readonly responseStatus: number;
     readonly responseBody: unknown;
+    readonly instrumentExpiresAt: Date | undefined;
   }): Promise<void>;
 }
 
@@ -380,6 +381,10 @@ export async function createPayment(
       completesRequest: !canTryAnotherProvider,
       responseStatus,
       responseBody: payment,
+      // Only when the instrument is one we are actually presenting. An expiry
+      // recorded for a code nobody will see would later expire a payment that
+      // never had a live instrument at all.
+      instrumentExpiresAt: unusableInstrument === undefined ? instrument?.expiresAt : undefined,
     });
 
     if (kind === 'created') {

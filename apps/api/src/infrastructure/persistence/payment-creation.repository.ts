@@ -75,6 +75,12 @@ export interface ApplyOutcomeCommand {
   */
   readonly responseStatus: number;
   readonly responseBody: unknown;
+  /**
+   * When the instrument the provider issued lapses. Stored so reconciliation can
+   * tell an unpaid payment that is still live from one that has outlived itself;
+   * without it, nothing knows a Pix code has died.
+   */
+  readonly instrumentExpiresAt: Date | undefined;
 }
 
 interface ExistingRecordRow {
@@ -385,6 +391,13 @@ export class PaymentCreationRepository {
           command.failureReason ?? null,
         ],
       );
+
+      if (command.instrumentExpiresAt !== undefined) {
+        await client.query('UPDATE payments SET expires_at = $2 WHERE id = $1', [
+          command.paymentId,
+          command.instrumentExpiresAt,
+        ]);
+      }
 
       await movePaymentStatus(client, {
         paymentId: command.paymentId,

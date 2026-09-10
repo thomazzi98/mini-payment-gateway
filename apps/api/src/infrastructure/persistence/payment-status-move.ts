@@ -33,6 +33,18 @@ export interface PaymentStatusMove {
     readonly amountMinor: bigint;
     readonly paidAt: Date;
   };
+  /**
+   * What a consumer of `payment.paid` needs, gathered by the caller because only
+   * it knows which provider and attempt produced the money.
+   */
+  readonly eventContext?: {
+    readonly publicId: string;
+    readonly environment: string;
+    readonly currency: string;
+    readonly merchantReference: string;
+    readonly providerCode: string | undefined;
+    readonly providerReference: string | undefined;
+  };
 }
 
 export async function movePaymentStatus(
@@ -97,5 +109,55 @@ export async function movePaymentStatus(
       move.capture.amountMinor.toString(),
       move.capture.paidAt,
     ],
+  );
+
+  await recordPaidEvent(client, move, move.capture);
+}
+
+/**
+ * Writes `payment.paid` in the same transaction as the money.
+ *
+ * This is the whole guarantee: a payment cannot commit as paid while its event
+ * fails to publish, because there is no moment at which one exists without the
+ * other. Publishing after the commit would leave exactly that window, and the
+ * payment nobody downstream ever hears about is the one that was paid.
+ *
+ * Written wherever a payment is funded rather than at each call site, so a future
+ * path that captures money cannot forget to announce it.
+ */
+async function recordPaidEvent(
+  client: PoolClient,
+  move: PaymentStatusMove,
+  capture: { readonly amountMinor: bigint; readonly paidAt: Date },
+): Promise<void> {
+  const context = move.eventContext;
+  if (context === undefined) {
+    throw new Error(
+      'a payment cannot be funded without the context its paid event carries; the caller must supply eventContext',
+    );
+  }
+
+  const payload = {
+    paymentId: context.publicId,
+    organizationId: move.organizationId,
+    merchantReference: context.merchantReference,
+    environment: context.environment,
+    currency: context.currency,
+    amountMinor: capture.amountMinor.toString(),
+    paidAt: capture.paidAt.toISOString(),
+    provider: context.providerCode ?? null,
+    providerReference: context.providerReference ?? null,
+    paymentAttemptId: move.attemptId,
+  };
+
+  // ON CONFLICT DO NOTHING against the one-paid-per-payment constraint. A payment
+  // reaching paid twice is already refused by the transition table; this makes the
+  // event side of it a no-op rather than an error, so a retry that got further
+  // than it thought cannot fail on the announcement.
+  await client.query(
+    `INSERT INTO payment_events (payment_id, organization_id, event_type, payload, occurred_at)
+     VALUES ($1, $2, 'payment.paid', $3, $4)
+     ON CONFLICT (payment_id, event_type) DO NOTHING`,
+    [move.paymentId, move.organizationId, JSON.stringify(payload), capture.paidAt],
   );
 }

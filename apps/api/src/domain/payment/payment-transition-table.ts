@@ -68,6 +68,7 @@ export const PAYMENT_TRIGGERS = [
   'RECONCILED_FAILED',
   'RESOLUTION_EXHAUSTED',
   'PAYMENT_CONFIRMED',
+  'PAYMENT_REFUSED',
   'LATE_PAYMENT_CONFIRMED',
   'EXPIRY_ELAPSED',
   'MERCHANT_CANCELLED',
@@ -203,6 +204,14 @@ export const PAYMENT_TRANSITIONS: readonly PaymentTransition[] = [
     trigger: 'PAYMENT_CONFIRMED',
     minimumEvidence: 'authenticated_provider_read',
     description: 'The provider confirmed, on an authenticated read, that the customer paid.',
+  },
+  {
+    from: 'awaiting_payment',
+    to: 'failed',
+    trigger: 'PAYMENT_REFUSED',
+    minimumEvidence: 'authenticated_provider_read',
+    description:
+      'The provider refused a live order outright, so no payment will arrive against it.',
   },
   {
     from: 'awaiting_payment',

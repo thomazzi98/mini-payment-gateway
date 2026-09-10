@@ -11,8 +11,21 @@ export interface DuePayment {
   readonly paymentId: string;
   readonly organizationId: string;
   readonly environment: 'SANDBOX' | 'PRODUCTION';
+  /**
+   * The status this payment was claimed from, and the reason the two are never
+   * merged: `unknown` is uncertainty about whether an operation happened at all,
+   * while `awaiting_payment` is certainty that it did and that nobody has paid
+   * yet. They resolve through different triggers, and a failure to inquire means
+   * something different in each.
+   */
+  readonly status: 'unknown' | 'awaiting_payment';
   readonly expectedAmountMinor: bigint;
   readonly currency: string;
+  /**
+   * When the instrument itself lapses, as the provider reported it at creation.
+   * Absent when the provider named none.
+   */
+  readonly expiresAt: Date | undefined;
   readonly attempts: number;
   readonly providerCode: string | undefined;
   readonly providerReference: string | undefined;
@@ -30,13 +43,27 @@ export interface ReconciliationStore {
     readonly evidenceClass: string;
     readonly reason: string;
     readonly capture?: { readonly amountMinor: bigint; readonly paidAt: Date };
+    /**
+     * Which provider interaction produced this, for the paid event to carry.
+     */
+    readonly providerCode: string | undefined;
+    readonly providerReference: string | undefined;
   }): Promise<'applied' | 'already_resolved'>;
-  deferResolution(
-    paymentId: string,
-    organizationId: string,
-    note: string,
-    dueAt: Date | undefined,
-  ): Promise<void>;
+  deferResolution(command: {
+    readonly paymentId: string;
+    readonly organizationId: string;
+    readonly note: string;
+    readonly dueAt: Date | undefined;
+    /**
+     * True when the provider answered and its answer was simply "not yet".
+     *
+     * That is a healthy payment behaving normally, not a failure, so it must not
+     * consume the budget that exists to stop asking about payments nobody can
+     * answer for. Without this an unpaid Pix would be abandoned to an operator
+     * after a dozen perfectly good replies.
+     */
+    readonly isHealthy: boolean;
+  }): Promise<void>;
 }
 
 /**

@@ -35,11 +35,26 @@ export interface ReconciliationSchedule {
   readonly baseBackoffSeconds: number;
   readonly maximumBackoffSeconds: number;
   /**
+   * How often to ask about a payment that is live and unpaid. Steady rather than
+   * backing off, because the answer is expected to change and asking costs one
+   * call.
+   */
+  readonly waitingPollSeconds: number;
+  /**
    * How long a payment may sit in `processing` or `pending` before it is treated
    * as abandoned. Generous, because a payment that is merely slow must never be
    * swept out from under the request still working on it.
    */
   readonly strandedAfterSeconds: number;
+  /**
+   * How long after an instrument's own expiry a payment may still be waiting
+   * before it is recorded as expired.
+   *
+   * A margin rather than the bare timestamp, because the provider's clock and
+   * ours are not the same clock, and recording a payment expired one second early
+   * would deny a customer who paid inside the window.
+   */
+  readonly expiryGraceSeconds: number;
 }
 
 export const DEFAULT_RECONCILIATION_SCHEDULE: ReconciliationSchedule = {
@@ -48,7 +63,9 @@ export const DEFAULT_RECONCILIATION_SCHEDULE: ReconciliationSchedule = {
   maximumAttempts: 12,
   baseBackoffSeconds: 30,
   maximumBackoffSeconds: 3600,
+  waitingPollSeconds: 60,
   strandedAfterSeconds: 900,
+  expiryGraceSeconds: 300,
 };
 
 export interface ReconciliationDependencies {
@@ -94,6 +111,11 @@ type ResolutionOutcome =
   Nothing can be asked: no reference, no provider, or no status capability.
   */
   | { readonly kind: 'cannot_inquire'; readonly reason: string }
+  /**
+  The provider answered, and the answer was that nobody has paid yet. The expected
+  reply for most of an instrument's life, and not a failure.
+  */
+  | { readonly kind: 'still_awaiting'; readonly reason: string }
   /**
   Scheduling has stopped. The payment is an operator's now.
   */
@@ -174,13 +196,35 @@ function backoffSeconds(attempts: number, schedule: ReconciliationSchedule): num
  * edge legal would fabricate the very evidence this exists to demand. They become
  * an operator's problem, correctly.
  */
-function transitionForObservation(observed: ObservedPaymentState):
+function transitionForObservation(
+  observed: ObservedPaymentState,
+  from: 'unknown' | 'awaiting_payment',
+):
   | {
       readonly toStatus: string;
       readonly trigger: string;
       readonly requiresCapture: boolean;
     }
   | undefined {
+  // A payment we know exists and know is unpaid resolves through ordinary
+  // lifecycle vocabulary. A payment whose creation may never have taken effect
+  // resolves through discovery vocabulary. An operator reading the history should
+  // be able to tell which question was being answered.
+  if (from === 'awaiting_payment') {
+    if (observed.lifecycle === 'paid') {
+      return { toStatus: 'paid', trigger: 'PAYMENT_CONFIRMED', requiresCapture: true };
+    }
+    if (observed.lifecycle === 'expired') {
+      return { toStatus: 'expired', trigger: 'EXPIRY_ELAPSED', requiresCapture: false };
+    }
+    if (observed.lifecycle === 'failed') {
+      return { toStatus: 'failed', trigger: 'PAYMENT_REFUSED', requiresCapture: false };
+    }
+    // Still waiting. Not a transition, and not a failure either: this is the
+    // expected answer for most of a Pix code's life.
+    return undefined;
+  }
+
   if (observed.lifecycle === 'paid') {
     return { toStatus: 'paid', trigger: 'RECONCILED_PAID', requiresCapture: true };
   }
@@ -254,30 +298,86 @@ async function reconcileOne(
     }
   }
 
+  // A payment that is simply not paid yet stays exactly where it is. This is the
+  // distinction the design rests on: an inquiry that failed says nothing about the
+  // payment, and an inquiry that succeeded and reported "not yet" says the payment
+  // is healthy. Neither makes it uncertain, and turning either into `unknown`
+  // would manufacture doubt about an operation that demonstrably happened.
+  if (payment.status === 'awaiting_payment') {
+    return { ...subject, ...(await deferWaiting(payment, inquiry, dependencies)) };
+  }
+
   const reason = inquiry.kind === 'observed' ? describeUnusable(inquiry.observed) : inquiry.reason;
 
   // Nothing usable came back. Either ask again later, or stop asking.
   if (payment.attempts >= dependencies.schedule.maximumAttempts) {
-    await dependencies.store.deferResolution(
-      payment.paymentId,
-      payment.organizationId,
-      `Reconciliation stopped after ${payment.attempts} inquiries: ${reason}`,
-      undefined,
-    );
+    await dependencies.store.deferResolution({
+      paymentId: payment.paymentId,
+      organizationId: payment.organizationId,
+      note: `Reconciliation stopped after ${payment.attempts} inquiries: ${reason}`,
+      dueAt: undefined,
+      isHealthy: false,
+    });
     return { ...subject, kind: 'awaiting_operator', reason };
   }
 
   const wait = backoffSeconds(payment.attempts, dependencies.schedule);
-  await dependencies.store.deferResolution(
-    payment.paymentId,
-    payment.organizationId,
-    reason,
-    new Date(dependencies.now().getTime() + wait * 1000),
-  );
+  await dependencies.store.deferResolution({
+    paymentId: payment.paymentId,
+    organizationId: payment.organizationId,
+    note: reason,
+    dueAt: new Date(dependencies.now().getTime() + wait * 1000),
+    isHealthy: false,
+  });
 
   return inquiry.kind === 'observed'
     ? { ...subject, kind: 'still_unknown', reason }
     : { ...subject, kind: 'cannot_inquire', reason };
+}
+
+/**
+ * Reschedules a payment that is still waiting to be paid.
+ *
+ * An inquiry that succeeded and said "not yet" costs nothing from the attempt
+ * budget, because the budget exists to stop asking about payments nobody can
+ * answer for, and this is a payment somebody answered for. An inquiry that failed
+ * does spend it, and exhausting it leaves the payment waiting and unscheduled for
+ * an operator — never uncertain.
+ */
+async function deferWaiting(
+  payment: DuePayment,
+  inquiry: InquiryResult,
+  dependencies: ReconciliationDependencies,
+): Promise<ResolutionOutcome> {
+  const isHealthy = inquiry.kind === 'observed';
+  const reason = isHealthy
+    ? 'The provider reports the instrument is live and unpaid.'
+    : inquiry.reason;
+
+  if (!isHealthy && payment.attempts >= dependencies.schedule.maximumAttempts) {
+    await dependencies.store.deferResolution({
+      paymentId: payment.paymentId,
+      organizationId: payment.organizationId,
+      note: `Could not reach the provider in ${payment.attempts} inquiries: ${reason}`,
+      dueAt: undefined,
+      isHealthy: false,
+    });
+    return { kind: 'awaiting_operator', reason };
+  }
+
+  const wait = isHealthy
+    ? dependencies.schedule.waitingPollSeconds
+    : backoffSeconds(payment.attempts, dependencies.schedule);
+
+  await dependencies.store.deferResolution({
+    paymentId: payment.paymentId,
+    organizationId: payment.organizationId,
+    note: reason,
+    dueAt: new Date(dependencies.now().getTime() + wait * 1000),
+    isHealthy,
+  });
+
+  return { kind: 'still_awaiting', reason };
 }
 
 type InquiryResult =
@@ -334,7 +434,9 @@ async function applyObservation(
   observed: ObservedPaymentState,
   dependencies: ReconciliationDependencies,
 ): Promise<ResolutionOutcome | undefined> {
-  const transition = transitionForObservation(observed);
+  const transition =
+    expiredTransitionFor(payment, observed, dependencies) ??
+    transitionForObservation(observed, payment.status);
   if (transition === undefined) {
     return undefined;
   }
@@ -364,6 +466,8 @@ async function applyObservation(
     // and this is the one place that could weaken it by claiming otherwise.
     evidenceClass: 'authenticated_provider_read',
     reason: `Provider reported ${observed.rawStatus}.`,
+    providerCode: payment.providerCode,
+    providerReference: payment.providerReference,
     ...(capture !== undefined && { capture }),
   });
 
@@ -371,6 +475,38 @@ async function applyObservation(
     return { kind: 'already_resolved' };
   }
   return { kind: 'resolved', toStatus: transition.toStatus, trigger: transition.trigger };
+}
+
+/**
+ * Records an unpaid instrument that has outlived itself.
+ *
+ * Requires both halves: the instrument's own expiry, passed by a margin, AND a
+ * provider read that came back and confirmed nobody has paid. A timestamp alone is
+ * a guess, and guesses are not recorded here as facts. With the read it is not a
+ * guess — the provider was asked and said no money arrived.
+ *
+ * Only from `awaiting_payment`. A payment in `unknown` has no instrument anybody
+ * has confirmed, so it has nothing to have outlived.
+ */
+function expiredTransitionFor(
+  payment: DuePayment,
+  observed: ObservedPaymentState,
+  dependencies: ReconciliationDependencies,
+):
+  | { readonly toStatus: string; readonly trigger: string; readonly requiresCapture: boolean }
+  | undefined {
+  if (payment.status !== 'awaiting_payment' || payment.expiresAt === undefined) {
+    return undefined;
+  }
+  if (observed.lifecycle !== 'awaiting_payment') {
+    return undefined;
+  }
+
+  const deadline = payment.expiresAt.getTime() + dependencies.schedule.expiryGraceSeconds * 1000;
+  if (dependencies.now().getTime() <= deadline) {
+    return undefined;
+  }
+  return { toStatus: 'expired', trigger: 'EXPIRY_ELAPSED', requiresCapture: false };
 }
 
 function describeUnusable(observed: ObservedPaymentState): string {

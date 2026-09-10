@@ -182,6 +182,7 @@ async function runCycle(outcome: {
     completesRequest: true,
     responseStatus: outcome.responseStatus,
     responseBody: { id: 'pay_rendered', status: outcome.toStatus },
+    instrumentExpiresAt: undefined,
   });
 
   return { ...created, attemptId, providerReference };

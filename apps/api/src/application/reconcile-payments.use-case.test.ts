@@ -33,8 +33,10 @@ const DUE: DuePayment = {
   paymentId: 'internal-1',
   organizationId: 'organization-1',
   environment: 'SANDBOX',
+  status: 'unknown',
   expectedAmountMinor: 10_000n,
   currency: 'BRL',
+  expiresAt: undefined,
   attempts: 1,
   providerCode: 'test-provider',
   providerReference: '3531',
@@ -48,7 +50,7 @@ interface RecordedCalls {
     evidenceClass: string;
     capturedAmountMinor: string | undefined;
   }[];
-  readonly deferred: { note: string; dueAt: Date | undefined }[];
+  readonly deferred: { note: string; dueAt: Date | undefined; isHealthy: boolean }[];
 }
 
 function storeFor(
@@ -68,8 +70,12 @@ function storeFor(
       });
       return Promise.resolve(applied);
     },
-    deferResolution: (_paymentId, _organizationId, note, dueAt) => {
-      calls.deferred.push({ note, dueAt });
+    deferResolution: (command) => {
+      calls.deferred.push({
+        note: command.note,
+        dueAt: command.dueAt,
+        isHealthy: command.isHealthy,
+      });
       return Promise.resolve();
     },
   };
