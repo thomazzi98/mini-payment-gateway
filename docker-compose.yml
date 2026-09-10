@@ -141,6 +141,13 @@ services:
       APPMAX_CLIENT_ID: ${APPMAX_CLIENT_ID:-}
       APPMAX_CLIENT_SECRET: ${APPMAX_CLIENT_SECRET:-}
       APPMAX_ENVIRONMENT: ${APPMAX_ENVIRONMENT:-SANDBOX}
+      # The worker serves no HTTP and ingests no notifications. It is given this
+      # because it shares the api's trust boundary exactly — same image, same
+      # database role, same provider credentials — so withholding it would buy
+      # nothing and cost a second configuration shape. Contrast the migration
+      # runner, which connects as the schema owner and is deliberately never
+      # given the API key pepper.
+      WEBHOOK_PATH_SECRET: ${WEBHOOK_PATH_SECRET:?WEBHOOK_PATH_SECRET is required}
       RECONCILIATION_POLL_MILLISECONDS: ${RECONCILIATION_POLL_MILLISECONDS:-5000}
     depends_on:
       roles:
