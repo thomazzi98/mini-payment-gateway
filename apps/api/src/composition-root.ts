@@ -35,6 +35,8 @@ import { PaymentEventRepository } from './infrastructure/persistence/payment-eve
 import { WhatsAppNotificationPublisher } from './infrastructure/notifications/whatsapp-notification-publisher.js';
 import { DEFAULT_DELIVERY_SCHEDULE } from './application/deliver-payment-events.use-case.js';
 import type { DeliveryDependencies } from './application/deliver-payment-events.use-case.js';
+import { livenessProbe } from './infrastructure/integrations/liveness-probe.js';
+import type { IntegrationProbe } from './interface/http/routes/health.routes.js';
 
 export interface ApplicationContext {
   readonly environment: Environment;
@@ -59,6 +61,11 @@ export interface ApplicationContext {
   readonly reconciliationInsight: PaymentReconciliationRepository;
   readonly webhooks: WebhookRouteDependencies;
   readonly corsAllowedOrigins: readonly string[];
+  /**
+   * Liveness of the services this process talks to, for readiness to report
+   * beside the database. Absent entries are integrations that are not configured.
+   */
+  readonly integrations: Readonly<Record<string, IntegrationProbe | undefined>>;
   shutdown(): Promise<void>;
 }
 
@@ -295,6 +302,18 @@ export function buildApplicationContext(): ApplicationContext {
     eventDeliveryInsight: eventRepository,
     webhooks,
     corsAllowedOrigins: commaSeparated(environment.HTTP_CORS_ALLOWED_ORIGINS),
+    integrations: {
+      cryptopay:
+        environment.CRYPTOPAY_BASE_URL === ''
+          ? undefined
+          : livenessProbe(`${withoutTrailingSlash(environment.CRYPTOPAY_BASE_URL)}/healthz`),
+      whatsappNotification:
+        environment.WHATSAPP_NOTIFICATION_BASE_URL === ''
+          ? undefined
+          : livenessProbe(
+              `${withoutTrailingSlash(environment.WHATSAPP_NOTIFICATION_BASE_URL)}/health`,
+            ),
+    },
     async shutdown(): Promise<void> {
       // One pool, closed once. Database wraps it rather than owning a second.
       await database.close();

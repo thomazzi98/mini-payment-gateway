@@ -5,6 +5,7 @@ import type { Database } from '../../infrastructure/persistence/database.js';
 import type { ApplicationServer } from './server-types.js';
 import { registerErrorHandling } from './error-handling.js';
 import { registerHealthRoutes } from './routes/health.routes.js';
+import type { HealthRouteDependencies } from './routes/health.routes.js';
 import { registerPaymentRoutes } from './routes/payment.routes.js';
 import { registerWebhookRoutes } from './routes/webhook.routes.js';
 import type { WebhookRouteDependencies } from './routes/webhook.routes.js';
@@ -24,6 +25,7 @@ export interface ServerDependencies {
    * unknown route.
    */
   readonly corsAllowedOrigins: readonly string[];
+  readonly integrations: NonNullable<HealthRouteDependencies['integrations']>;
 }
 
 const REQUEST_IDENTIFIER_PATTERN = /^[\w-]{8,64}$/;
@@ -58,7 +60,10 @@ export function createServer(dependencies: ServerDependencies): ApplicationServe
   registerCors(server, dependencies.corsAllowedOrigins);
   registerErrorHandling(server);
 
-  registerHealthRoutes(server, { database: dependencies.database });
+  registerHealthRoutes(server, {
+    database: dependencies.database,
+    integrations: dependencies.integrations,
+  });
   registerPaymentRoutes(server, {
     authentication: dependencies.authentication,
     payments: dependencies.payments,
