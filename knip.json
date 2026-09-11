@@ -16,6 +16,9 @@
     },
     "packages/shared": {
       "project": ["src/**"]
+    },
+    "apps/dashboard": {
+      "project": ["src/**"]
     }
   },
   "ignoreDependencies": ["@commitlint/cli", "husky", "lint-staged"]

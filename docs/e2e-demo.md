@@ -3,16 +3,16 @@
 Four repositories, one flow, nothing substituted:
 
 ```
-portfolio ──► payment gateway ──► CryptoPay ──► destination on a local chain
-                   ▲                  │
-                   │                  │  the customer pays; CryptoPay scans, confirms,
-                   │                  │  and delivers a signed webhook
-                   │◄─────────────────┘
-                   │  the gateway verifies the signature, schedules an authenticated
-                   │  read, confirms on the read, writes payment.paid in the same
-                   │  transaction as the money
-                   ▼
-   WhatsApp Notification Platform ──► WAHA ──► the customer's phone
+portfolio ──► checkout ──► payment gateway ──► CryptoPay ──► destination on a local chain
+                                ▲                  │
+                                │                  │  the customer pays; CryptoPay scans, confirms,
+                                │                  │  and delivers a signed webhook
+                                │◄─────────────────┘
+                                │  the gateway verifies the signature, schedules an authenticated
+                                │  read, confirms on the read, writes payment.paid in the same
+                                │  transaction as the money
+                                ▼
+                WhatsApp Notification Platform ──► WAHA ──► the customer's phone
 ```
 
 Every arrow is an HTTP call between independently deployed services with their
@@ -48,6 +48,35 @@ GATEWAY_API_KEY=… WHATSAPP_API_KEY=… npm run test:e2e
 `status`, `down` and `reset` do what they say; `reset` discards every volume,
 including the chain, which is the answer to any cursor that has outrun a chain
 restarted without its state.
+
+`up` is safe to repeat. It reuses what it provisioned before, and it reads every
+WhatsApp connection of the demo tenant back through the platform before choosing
+one: the stub keeps its pairings in memory, so a rebuilt stub container has lost
+them, and a read is what makes the platform write that down instead of queuing
+notifications against a connection that can no longer send.
+
+## The checkout
+
+`http://127.0.0.1:4020` is `apps/dashboard`: a static page, built with Vite and
+served by nginx, that talks to nothing but the gateway. Paste the printed gateway
+key once (it is kept in the browser's `localStorage`), choose an amount, and the
+page does what a merchant's integration does — `POST /v1/payments` with an
+idempotency key, then `GET /v1/payments/:id` every two seconds — and shows what
+comes back: the destination and QR code CryptoPay issued, the payment's status,
+the provider reference, each transition and provider notification as a timeline,
+and the `payment.paid` event with its delivery to the notification platform.
+
+Pay the QR code with `npm run demo:pay -- <uri>` (the Anvil payer, as the test
+does) or with a browser wallet pointed at the local chain, and watch it settle.
+Nothing on the page is timed or assumed: every stage is derived from the
+payment as the gateway reports it, and the flow diagram stops claiming at the
+point the gateway stops knowing — the platform accepted the notification; what
+WAHA did with it is the platform's to report.
+
+The method selector lists what the gateway's `GET /v1/payment-options` offers
+for the sandbox environment. Pix through Appmax is shown as implemented and not
+selectable here, with the reason: no sandbox credentials are configured, so no
+provider serves it. Nothing about the PSP path is simulated.
 
 ## What the test proves
 

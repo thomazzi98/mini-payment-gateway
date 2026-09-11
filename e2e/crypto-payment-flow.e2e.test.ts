@@ -150,13 +150,14 @@ async function waitFor(
   isSatisfied: () => Promise<boolean>,
   timeoutMilliseconds: number,
   description: string,
+  intervalMilliseconds = 1000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMilliseconds;
   while (Date.now() < deadline) {
     if (await isSatisfied()) {
       return;
     }
-    await new Promise((settle) => setTimeout(settle, 1000));
+    await new Promise((settle) => setTimeout(settle, intervalMilliseconds));
   }
   throw new Error(`timed out waiting for ${description}`);
 }
@@ -306,18 +307,29 @@ describe('a crypto payment, end to end', () => {
     const detail = await readPayment(created.id);
     const reference = detail.events[0]?.delivery.reference ?? '';
 
-    const notification = async () => {
-      const response = await fetch(`${WHATSAPP_API_URL}/v1/notifications/${reference}`, {
-        headers: { authorization: `Bearer ${WHATSAPP_API_KEY}` },
-      });
-      expect(response.status).toBe(200);
-      return (await response.json()) as {
-        status: string;
-        recipient: string;
-        body: string;
-        providerMessageId: string | null;
-        metadata: Record<string, string>;
-      };
+    interface Notification {
+      status: string;
+      recipient: string;
+      body: string;
+      providerMessageId: string | null;
+      metadata: Record<string, string>;
+    }
+    // The platform budgets requests per key and answers 429 with Retry-After
+    // when the budget is spent. That is the platform working, so the read waits
+    // it out rather than counting it as an answer about the notification.
+    const notification = async (): Promise<Notification> => {
+      for (;;) {
+        const response = await fetch(`${WHATSAPP_API_URL}/v1/notifications/${reference}`, {
+          headers: { authorization: `Bearer ${WHATSAPP_API_KEY}` },
+        });
+        if (response.status === 429) {
+          const retryAfter = Number(response.headers.get('retry-after') ?? '5');
+          await new Promise((settle) => setTimeout(settle, Math.max(1, retryAfter) * 1000));
+          continue;
+        }
+        expect(response.status).toBe(200);
+        return (await response.json()) as Notification;
+      }
     };
 
     const accepted = await notification();
@@ -332,8 +344,9 @@ describe('a crypto payment, end to end', () => {
         const current = await notification();
         return current.providerMessageId !== null;
       },
-      120_000,
+      180_000,
       'the notification platform to send through WAHA',
+      5000,
     );
     const sent = await notification();
     expect(sent.providerMessageId).toMatch(/^STUB/);
@@ -349,7 +362,7 @@ describe('a crypto payment, end to end', () => {
       (entry) => entry.metadata['paymentId'] === created.id,
     );
     expect(forThisPayment).toHaveLength(1);
-  }, 150_000);
+  }, 200_000);
 
   it('answers a replayed provider notification without a second effect', async () => {
     // A redelivery of CryptoPay's own event is the ordinary case, and this

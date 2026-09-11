@@ -194,6 +194,31 @@ export default typescriptEslint.config(
     },
   },
 
+  // The checkout runs in a browser. It is the one place window and document
+  // exist, and the one place node builtins do not.
+  {
+    files: ['apps/dashboard/src/**/*.ts'],
+    languageOptions: { globals: { ...globals.browser } },
+    rules: {
+      // The page builds its DOM as a tree of element() calls, and a tree is
+      // nested calls by nature; the depth limit would flatten what reads best
+      // as the markup it produces.
+      'unicorn/max-nested-calls': 'off',
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['node:*', ...INFRASTRUCTURE_ONLY_PACKAGES, '**/apps/api/**'],
+              message:
+                'The checkout is a browser client of the public API and may not reach into the process or the server.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+
   // Process entrypoints own the process lifecycle: exiting with a status code is
   // how they report failure to the orchestrator.
   {
@@ -214,7 +239,13 @@ export default typescriptEslint.config(
   },
 
   {
-    files: ['scripts/**/*.mjs', '*.config.js', '*.config.mjs', '*.config.ts'],
+    files: [
+      'scripts/**/*.mjs',
+      '*.config.js',
+      '*.config.mjs',
+      '*.config.ts',
+      'apps/dashboard/vite.config.ts',
+    ],
     extends: [typescriptEslint.configs.disableTypeChecked],
     rules: {
       // These are command-line tools. Printing progress and exiting with a status code is

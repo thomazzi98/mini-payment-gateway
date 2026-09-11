@@ -133,13 +133,21 @@ rather than retrying the one that failed. That is safe but less capable than the
 taxonomy allows, and with a single provider configured it means a transient
 connection failure fails the payment.
 
-## No dashboard, no hosted checkout
+## No merchant dashboard; the checkout is a demonstration, not a hosted checkout
 
-None of the merchant-facing surfaces exist. Specifically absent: the admin
-dashboard and everything configurable through it, the sandbox test mode, and the
-hosted checkout page. The one customer-facing surface is the portfolio site,
-which drives the API directly from the browser through the configured CORS
-origins.
+The admin dashboard and everything configurable through it do not exist, and
+neither does a sandbox test mode.
+
+`apps/dashboard` is a checkout page that drives the public API from the browser
+and shows a payment settle, stage by stage, from what `GET /v1/payments/:id`
+reports. It is a demonstration surface: it holds a merchant API key in the
+browser (entered once, kept in `localStorage`), which is what a merchant's own
+server would hold and a hosted checkout would never hand to a customer. A hosted
+checkout — a per-payment, public, short-lived session that a customer can open
+without a merchant credential — is not implemented. The page also shows only
+what the gateway itself knows: it can report that the notification platform
+accepted the `payment.paid` message, and it does not claim to know whether WAHA
+sent it.
 
 Provider and notification credentials come from environment variables rather
 than from per-organization configuration in the database. Adding a second

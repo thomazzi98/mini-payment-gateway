@@ -1,0 +1,79 @@
+{
+  "id": "pay_tf9txtjbsa6nx86qcdn1ct66pm",
+  "status": "paid",
+  "paymentMethod": "crypto",
+  "environment": "SANDBOX",
+  "amountMinor": "1500000",
+  "capturedAmountMinor": "1500000",
+  "currency": "USDC",
+  "merchantReference": "demo-50da7100",
+  "createdAt": "2026-09-11T05:26:30.187Z",
+  "updatedAt": "2026-09-11T05:26:44.361Z",
+  "expiresAt": "2026-09-11T05:56:30.445Z",
+  "paidAt": "2026-09-11T05:26:37.909Z",
+  "provider": "cryptopay",
+  "providerReference": "pay_01M27EX09D7CXW1CWEBD6BG0YE",
+  "instrument": {
+    "type": "crypto",
+    "asset": "USDC",
+    "network": "polygon",
+    "expiresAt": "2026-09-11T05:56:30.445Z",
+    "paymentUri": "ethereum:0x5fbdb2315678afecb367f032d93f642f64180aa3@31337/transfer?address=0xae11513cea825da2637277230b85d7924593b397&uint256=1500000",
+    "destinationAddress": "0xae11513cea825da2637277230b85d7924593b397",
+    "qrCodeImageDataUri": "data:image/png;base64,iVBORw0KGgo="
+  },
+  "transitions": [
+    {
+      "sequence": 1,
+      "fromStatus": "pending",
+      "toStatus": "processing",
+      "trigger": "PROVIDER_REQUEST_SENT",
+      "evidenceClass": "internal",
+      "occurredAt": "2026-09-11T05:26:30.275Z"
+    },
+    {
+      "sequence": 2,
+      "fromStatus": "processing",
+      "toStatus": "awaiting_payment",
+      "trigger": "INSTRUMENT_ISSUED",
+      "evidenceClass": "authenticated_provider_read",
+      "occurredAt": "2026-09-11T05:26:30.500Z"
+    },
+    {
+      "sequence": 3,
+      "fromStatus": "awaiting_payment",
+      "toStatus": "paid",
+      "trigger": "PAYMENT_CONFIRMED",
+      "evidenceClass": "authenticated_provider_read",
+      "reason": "Provider reported PAID.",
+      "occurredAt": "2026-09-11T05:26:44.361Z"
+    }
+  ],
+  "providerNotifications": [
+    {
+      "provider": "cryptopay",
+      "eventType": "payment.confirming",
+      "receivedAt": "2026-09-11T05:26:35.480Z",
+      "disposition": "ignored"
+    },
+    {
+      "provider": "cryptopay",
+      "eventType": "payment.completed",
+      "receivedAt": "2026-09-11T05:26:39.611Z",
+      "disposition": "scheduled_read"
+    }
+  ],
+  "events": [
+    {
+      "type": "payment.paid",
+      "occurredAt": "2026-09-11T05:26:37.909Z",
+      "delivery": {
+        "channel": "whatsapp",
+        "status": "delivered",
+        "attempts": 1,
+        "reference": "01a08eee-bd7d-740e-b7cd-423c6d5c17b4",
+        "publishedAt": "2026-09-11T05:26:46.042Z"
+      }
+    }
+  ]
+}

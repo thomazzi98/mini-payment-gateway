@@ -118,8 +118,9 @@ services:
       # default: events stay pending, visibly, and no payment is affected.
       WHATSAPP_NOTIFICATION_BASE_URL: ${WHATSAPP_NOTIFICATION_BASE_URL:-}
       WHATSAPP_NOTIFICATION_API_KEY: ${WHATSAPP_NOTIFICATION_API_KEY:-}
-      # Browser origins that may call the API directly, for the portfolio demo.
-      HTTP_CORS_ALLOWED_ORIGINS: ${HTTP_CORS_ALLOWED_ORIGINS:-}
+      # Browser origins that may call the API directly. The default is the
+      # bundled checkout on this machine; a deployment lists its own, or none.
+      HTTP_CORS_ALLOWED_ORIGINS: ${HTTP_CORS_ALLOWED_ORIGINS:-http://127.0.0.1:4020,http://localhost:4020}
     ports:
       - '127.0.0.1:${API_HOST_PORT:-4010}:3000'
     depends_on:
@@ -186,6 +187,30 @@ services:
     # Reaches Appmax to ask about uncertain payments, and nothing else. Same two
     # networks as the api for the same reason.
     networks: [internal, outbound]
+    restart: unless-stopped
+
+  # The demo checkout: a static page that talks to the api from the browser and
+  # to nothing else. Built here so `docker compose up` is the whole product, and
+  # served by an unprivileged nginx because there is nothing to run at runtime.
+  dashboard:
+    build:
+      context: .
+      dockerfile: docker/dashboard.Dockerfile
+      args:
+        # Where the browser, not the container, reaches the api.
+        VITE_GATEWAY_URL: ${DASHBOARD_GATEWAY_URL:-http://127.0.0.1:${API_HOST_PORT:-4010}}
+    ports:
+      - '127.0.0.1:${DASHBOARD_HOST_PORT:-4020}:8080'
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:8080/index.html || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # Serves files; reaches nothing. It is on no network that has the datastores.
+    networks: [outbound]
     restart: unless-stopped
 
   test:

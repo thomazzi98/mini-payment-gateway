@@ -46,10 +46,17 @@ const CRYPTOPAY_URL = 'http://127.0.0.1:3001';
 const WHATSAPP_URL = 'http://127.0.0.1:3100';
 const WAHA_STUB_URL = 'http://127.0.0.1:3200';
 const GATEWAY_URL = 'http://127.0.0.1:4010';
+const DASHBOARD_URL = 'http://127.0.0.1:4020';
 const ANVIL_URL = 'http://127.0.0.1:8545';
 
-const PORTFOLIO_ORIGINS =
-  'http://localhost:4321,http://127.0.0.1:4321,https://thomazzi98.github.io';
+// The bundled checkout, the portfolio in development, and the portfolio as published.
+const BROWSER_ORIGINS = [
+  'http://127.0.0.1:4020',
+  'http://localhost:4020',
+  'http://localhost:4321',
+  'http://127.0.0.1:4321',
+  'https://thomazzi98.github.io',
+].join(',');
 
 function log(message) {
   process.stdout.write(`${message}\n`);
@@ -341,47 +348,61 @@ async function ensureApiKey(session, applicationId, demo) {
   return created.body.plaintextKey;
 }
 
-async function ensureConnectedSession(session, applicationId, demo) {
+/**
+ * A connection the platform reports as WORKING, paired through the stub.
+ *
+ * The platform queues a notification against the first connection whose record
+ * looks connected, and a record is only as current as the last answer the
+ * provider gave about it. Reading a connection makes the platform ask the
+ * provider first, so every connection of the application is read before one is
+ * chosen: a pairing the stub lost (its sessions live in memory, and a rebuilt
+ * container starts empty) is then written down as STOPPED instead of staying
+ * first in line as a WORKING record every send would fail against.
+ */
+async function ensureConnectedSession(session, applicationId) {
   const base = `/dashboard/applications/${applicationId}/whatsapp-sessions`;
-  let sessionId = demo.DEMO_WHATSAPP_SESSION_ID;
-  let connection = sessionId
-    ? await whatsappRequest(`${base}/${sessionId}`, { session })
-    : undefined;
-  if (connection === undefined || connection.status !== 200) {
-    const created = await whatsappRequest(base, {
-      method: 'POST',
-      session,
-      body: { displayName: 'Payment confirmations' },
-    });
-    if (created.status !== 201) {
-      fail(
-        `Could not create a WhatsApp connection (${created.status}): ${JSON.stringify(created.body)}`,
-      );
-    }
-    sessionId = created.body.id;
-    connection = created;
+  const listed = await whatsappRequest(base, { session });
+  if (listed.status !== 200) {
+    fail(`Could not list WhatsApp connections (${listed.status}): ${JSON.stringify(listed.body)}`);
   }
-  if (connection.body.status !== 'WORKING') {
-    await whatsappRequest(`${base}/${sessionId}/start`, { method: 'POST', session });
-    await whatsappRequest(`${base}/${sessionId}/qr-code`, { session });
-    // The stub stands in for a person scanning the code with a phone.
-    const scan = await fetch(`${WAHA_STUB_URL}/__stub/sessions/wnp-${sessionId}/scan`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ phoneNumber: '5511999990000' }),
-    });
-    if (!scan.ok) {
-      fail(`The provider stub refused the scan (${scan.status}). Is the stub profile running?`);
+  for (const known of listed.body.data) {
+    const current = await whatsappRequest(`${base}/${known.id}`, { session });
+    if (current.status === 200 && current.body.status === 'WORKING') {
+      return known.id;
     }
-    await waitFor(
-      'the WhatsApp connection to pair',
-      async () => {
-        const current = await whatsappRequest(`${base}/${sessionId}`, { session });
-        return current.body?.status === 'WORKING';
-      },
-      60_000,
+    log(`connection ${known.id} is ${current.body?.status ?? 'gone'}`);
+  }
+
+  // Creating a connection starts it at the provider, which then waits for a scan.
+  const created = await whatsappRequest(base, {
+    method: 'POST',
+    session,
+    body: { displayName: 'Payment confirmations' },
+  });
+  if (created.status !== 201) {
+    fail(
+      `Could not create a WhatsApp connection (${created.status}): ${JSON.stringify(created.body)}`,
     );
   }
+  const sessionId = created.body.id;
+
+  // The stub stands in for a person scanning the code with a phone.
+  const scan = await fetch(`${WAHA_STUB_URL}/__stub/sessions/wnp-${sessionId}/scan`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ phoneNumber: '5511999990000' }),
+  });
+  if (!scan.ok) {
+    fail(`The provider stub refused the scan (${scan.status}). Is the stub profile running?`);
+  }
+  await waitFor(
+    'the WhatsApp connection to pair',
+    async () => {
+      const current = await whatsappRequest(`${base}/${sessionId}`, { session });
+      return current.body?.status === 'WORKING';
+    },
+    60_000,
+  );
   return sessionId;
 }
 
@@ -394,7 +415,7 @@ async function startWhatsapp(demo) {
   const account = await signIn(demo);
   const applicationId = await ensureApplication(account.session, demo);
   const apiKey = await ensureApiKey(account.session, applicationId, demo);
-  const sessionId = await ensureConnectedSession(account.session, applicationId, demo);
+  const sessionId = await ensureConnectedSession(account.session, applicationId);
   log(`notification application ${applicationId} is paired through the stub`);
   return { account, applicationId, apiKey, sessionId };
 }
@@ -444,7 +465,7 @@ async function startGateway(demo, cryptoPay, whatsapp) {
     CRYPTOPAY_WEBHOOK_SECRETS: cryptoPay.secrets,
     WHATSAPP_NOTIFICATION_BASE_URL: 'http://whatsapp-notification:3000',
     WHATSAPP_NOTIFICATION_API_KEY: whatsapp.apiKey,
-    HTTP_CORS_ALLOWED_ORIGINS: PORTFOLIO_ORIGINS,
+    HTTP_CORS_ALLOWED_ORIGINS: BROWSER_ORIGINS,
     DEMO_WHATSAPP_EMAIL: whatsapp.account.email,
     DEMO_WHATSAPP_PASSWORD: whatsapp.account.password,
     DEMO_WHATSAPP_APPLICATION_ID: whatsapp.applicationId,
@@ -458,6 +479,7 @@ async function startGateway(demo, cryptoPay, whatsapp) {
     ['up', '-d', '--build'],
   );
   await waitFor('the gateway API', () => isHealthy(`${GATEWAY_URL}/health`));
+  await waitFor('the checkout', () => isHealthy(`${DASHBOARD_URL}/`));
 
   let gatewayKey = values.DEMO_GATEWAY_API_KEY;
   if (gatewayKey) {
@@ -495,6 +517,7 @@ async function up() {
   const gatewayKey = await startGateway(demo, cryptoPay, whatsapp);
 
   log('\n== Ready ==');
+  log(`checkout           ${DASHBOARD_URL}   (the demo: create, pay, watch it settle)`);
   log(`gateway            ${GATEWAY_URL}`);
   log(`cryptopay          ${CRYPTOPAY_URL}   (dashboard http://localhost:3000)`);
   log(`notification api   ${WHATSAPP_URL}   (dashboard http://127.0.0.1:8080)`);
@@ -502,7 +525,7 @@ async function up() {
     `local chain        ${ANVIL_URL}  (chain id 31337, USDC 0x5fbdb2315678afecb367f032d93f642f64180aa3)`,
   );
   log('');
-  log('Gateway API key for the portfolio demo page and the end-to-end test:');
+  log('Gateway API key for the checkout page and the end-to-end test:');
   log(`  ${gatewayKey}`);
   log('');
   log('Run the end-to-end flow with:');
@@ -522,6 +545,7 @@ async function status() {
   }
   log('');
   for (const [name, url] of [
+    ['checkout', `${DASHBOARD_URL}/`],
     ['gateway', `${GATEWAY_URL}/health`],
     ['cryptopay', `${CRYPTOPAY_URL}/healthz`],
     ['notification platform', `${WHATSAPP_URL}/health`],

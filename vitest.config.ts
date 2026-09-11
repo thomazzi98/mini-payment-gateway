@@ -41,6 +41,15 @@ export default defineConfig({
         },
       },
       {
+        // The checkout's pure modules: how a gateway record becomes a screen.
+        test: {
+          name: 'dashboard',
+          root: './apps/dashboard',
+          include: ['src/**/*.test.ts'],
+          environment: 'node',
+        },
+      },
+      {
         test: {
           name: 'tools',
           root: './scripts',

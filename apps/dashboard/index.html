@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Demo checkout · Payment Gateway</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%2312161c'/%3E%3Cpath d='M4 11.5V4.5h4.2a2.3 2.3 0 0 1 0 4.6H6.2v2.4z' fill='%237ee0a4'/%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="masthead">
+        <div>
+          <p class="masthead__product">Payment Gateway</p>
+          <h1 class="masthead__title">Demo checkout</h1>
+        </div>
+        <div class="masthead__reach" data-reach aria-label="Reachability"></div>
+      </header>
+
+      <details class="connection" data-connection>
+        <summary>Gateway connection</summary>
+        <div class="connection__fields">
+          <label class="field">
+            <span class="field__label">Gateway URL</span>
+            <input data-gateway-url type="url" autocomplete="off" spellcheck="false" required />
+          </label>
+          <label class="field">
+            <span class="field__label">API key</span>
+            <input
+              data-api-key
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="mpg_test_…"
+            />
+          </label>
+          <button data-connect type="button" class="button button--quiet">Connect</button>
+        </div>
+        <p class="hint" data-connection-note>
+          The key is a merchant key with payments:write and payments:read, issued by the gateway's
+          seed. It stays in this browser.
+        </p>
+      </details>
+
+      <main class="layout">
+        <form class="checkout" data-checkout aria-labelledby="checkout-title" novalidate>
+          <h2 id="checkout-title" class="section-title">Payment</h2>
+
+          <div class="field">
+            <span class="field__label">Payment method</span>
+            <div class="methods" data-methods role="radiogroup" aria-label="Payment method"></div>
+            <p class="hint" data-provider-note></p>
+          </div>
+
+          <label class="field">
+            <span class="field__label">Amount</span>
+            <input data-amount type="text" inputmode="decimal" autocomplete="off" required />
+          </label>
+
+          <div class="field field--pair">
+            <label class="field" data-field>
+              <span class="field__label">Currency</span>
+              <select data-currency></select>
+            </label>
+            <label class="field" data-field>
+              <span class="field__label">Network</span>
+              <select data-network></select>
+            </label>
+          </div>
+
+          <label class="field">
+            <span class="field__label">WhatsApp number to notify · optional</span>
+            <input
+              data-phone
+              type="tel"
+              autocomplete="off"
+              placeholder="+5511988887777"
+              aria-describedby="phone-hint"
+            />
+            <span id="phone-hint" class="hint">
+              E.164. The paid event is handed to the notification platform for this number.
+            </span>
+          </label>
+
+          <p class="alert" data-problem role="alert" hidden></p>
+
+          <button data-submit type="submit" class="button button--primary">Create payment</button>
+        </form>
+
+        <section class="payment" data-payment aria-label="Payment" aria-live="polite"></section>
+      </main>
+
+      <footer class="foot">
+        <p>
+          Real services, a local chain, nothing simulated. This page talks to the payment gateway
+          and to nothing else; CryptoPay, the chain and the WhatsApp platform are seen only through
+          what the gateway records.
+        </p>
+      </footer>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

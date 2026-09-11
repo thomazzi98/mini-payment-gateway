@@ -27,11 +27,13 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "vitest run --project domain --project shared --project tools",
+    "test": "vitest run --project domain --project shared --project dashboard --project tools",
     "test:integration": "vitest run --project integration",
     "test:all": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "vitest run --project e2e",
+    "demo:up": "node scripts/demo-stack.mjs up",
+    "demo:pay": "node scripts/demo-pay.mjs",
     "knip": "knip",
     "docs:generate": "node scripts/verify-docs.mjs --write",
     "docs:check": "node scripts/verify-docs.mjs",
@@ -56,6 +58,7 @@
     "prettier": "3.9.6",
     "typescript": "6.0.3",
     "typescript-eslint": "8.70.0",
+    "vite": "8.2.2",
     "vitest": "5.0.0"
   }
 }
