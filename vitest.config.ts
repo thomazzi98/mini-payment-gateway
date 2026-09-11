@@ -48,6 +48,20 @@ export default defineConfig({
           environment: 'node',
         },
       },
+      {
+        // The whole demonstration against the running stacks. Serial, slow, and
+        // never part of the default run: it needs three stacks and a chain.
+        test: {
+          name: 'e2e',
+          root: './e2e',
+          include: ['**/*.e2e.test.ts'],
+          environment: 'node',
+          testTimeout: 120_000,
+          hookTimeout: 60_000,
+          fileParallelism: false,
+          sequence: { concurrent: false },
+        },
+      },
     ],
     coverage: {
       provider: 'v8',

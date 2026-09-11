@@ -7,21 +7,24 @@ is named rather than left for the reader to discover.
 
 ```
 merchant
-   │  POST /v1/payments, Idempotency-Key, API key
+   │  POST /v1/payments, GET /v1/payments/:id, Idempotency-Key, API key
    ▼
 api (Fastify)
    │  authenticate → validate → one use case
    ▼
-application            provider registry ──► Appmax adapter ──► Appmax
-   │                                               ▲
-   ▼                                               │
+application            provider registry ──► Appmax adapter ────► Appmax (Pix)
+   │                                     └──► CryptoPay adapter ─► CryptoPay (crypto)
+   ▼                                               ▲
 PostgreSQL  ◄──── reconciliation worker ───────────┘
+     │
+     └──── event delivery worker ──► WhatsApp Notification Platform
 ```
 
 Two processes, one image, one database:
 
-- **api** serves HTTP.
-- **worker** resolves payments whose outcome was never determined.
+- **api** serves HTTP, and receives provider notifications.
+- **worker** resolves payments whose outcome was never determined, confirms
+  payments that are waiting, and hands the paid event on.
 
 Both connect as `payment_gateway_application`, a role that owns nothing, cannot
 create anything, and cannot bypass row-level security.
@@ -225,8 +228,8 @@ says. The money arrived; a lapsed deadline does not undo that.
 ## Provider notifications
 
 ```
-POST /v1/webhooks/appmax/<secret>
-      │  raw bytes, parsed only by this route
+POST /v1/webhooks/appmax/<secret>        POST /v1/webhooks/cryptopay
+      │  raw bytes, parsed only by these routes
       ▼
 verify ──► parse ──► resolve the provider reference ──► record ──► bring the
                                                          │         inquiry forward
@@ -248,6 +251,14 @@ after it. The endpoint is bounded instead by an unguessable path segment, which 
 our own shared secret rather than a pretence at verifying the provider's. It is
 compared in constant time, and a wrong secret answers exactly as an unknown path
 does, so a prober learns nothing from the difference.
+
+**CryptoPay does sign**, as a Standard Webhook: HMAC-SHA256 over
+`{id}.{timestamp}.{raw body}` with a `whsec_` secret, several accepted so a
+rotation can overlap, the timestamp bounded against now in both directions. A
+notification that does not verify is refused before it is read. It is still not
+evidence: a verified notification schedules the same authenticated read Appmax's
+does, and the database still refuses to fund a payment on anything less. The
+signature bounds who can cause a read; the read decides.
 
 **Ownership comes from the provider reference**, which was recorded on an attempt
 against one payment of one merchant. There is no merchant, organization or payment
@@ -282,19 +293,55 @@ avoid a problem a row already solves. `UNIQUE (payment_id, event_type)` means on
 payment produces one paid event however many times the path is retried.
 
 The payload carries the payment id, organization, merchant reference, environment,
-currency, amount in minor units, paid timestamp, provider, provider reference and
-attempt id — and no credential of any kind. **Nothing consumes it yet**: what is
-established now is that the event exists, not that anything reads it.
+payment method, currency, amount in minor units, paid timestamp, the customer's
+phone when the merchant gave one, provider, provider reference and attempt id —
+and no credential of any kind.
+
+### Delivery
+
+```
+payment_events, pending and due
+      │  claimed by lease, cross-tenant through one SECURITY DEFINER function
+      ▼
+POST /v1/notifications on the WhatsApp Notification Platform
+      │  Idempotency-Key: the event id
+      ▼
+accepted ──► delivered, with the platform's identifier
+retry    ──► deferred with capped exponential backoff; abandoned after a budget
+refused  ──► abandoned, an operator's
+no phone ──► skipped
+```
+
+The worker that reconciles payments also delivers events, by the same claiming
+rule: a lease, not a lock, so a worker that dies delays its events by one lease
+and strands none. The event id travels as the platform's idempotency key, so a
+retry after a timeout or a restart cannot become a second message.
+
+Nothing about delivery can reach a payment. The payment was paid before the event
+was claimed, and stays paid whatever the platform answers; every outcome is
+visible on `GET /v1/payments/:id`, which reports the event and its delivery state
+alongside the transitions and the provider notifications. What the gateway
+records is that the platform accepted the message durably; sending, pacing and
+retrying towards WhatsApp are the platform's own, tracked there.
 
 ## Provider abstraction
 
 The domain never learns a processor's vocabulary.
 
 ```
-PixPaymentProvider
-  ├── createPixInstrument(request) → ProviderResult<PixInstrument>
-  └── readPaymentState(reference)  → ProviderResult<ObservedPaymentState>
+PixPaymentProvider                          CryptoPaymentProvider
+  ├── createPixInstrument(request)            ├── createCryptoInstrument(request)
+  └── readPaymentState(reference)             └── readPaymentState(reference)
 ```
+
+A Pix instrument is a copy-and-paste code; a crypto instrument is a destination,
+a payment URI and a QR code the provider rendered for whatever chain it chose.
+Reading state has one shape for both, because reconciliation and the webhook
+path do not care which rails a payment took. The CryptoPay adapter speaks
+CryptoPay's gateway contract — a chain family, a currency, a decimal string — and
+nothing above it learns what a chain id is. A crypto payment correlates on the
+gateway's own payment id, which is unique forever, where a merchant reference is
+free again once an earlier payment has finished.
 
 Capabilities are declared, not assumed. A provider that does not declare
 `pix.create` is never offered a Pix payment; one that does not declare

@@ -3,8 +3,15 @@
 What this system does not do, stated without hedging. A limitations document that
 reads like marketing is worse than none, because it teaches the reader to skip it.
 
-Everything here is current as of the payment-confirmation milestone. Each entry
+Everything here is current as of the cross-repository integration. Each entry
 says what is missing, what it costs, and what happens meanwhile.
+
+**What has been validated end to end is the crypto flow, not the Pix one.** A
+payment created here through CryptoPay, paid on a local chain, confirmed on an
+authenticated read, and delivered as a WhatsApp notification through the
+platform's provider stub has been executed and asserted against the running
+stacks — see [e2e-demo.md](e2e-demo.md). The Pix flow through Appmax has not,
+for the reason in the next section.
 
 ## Live Appmax integration has not been performed end to end
 
@@ -82,29 +89,40 @@ section.
 ## Merchants receive no callbacks
 
 Provider notifications are ingested; outbound merchant webhooks do not exist. A
-merchant learns a payment was paid only by asking, and there is no endpoint to ask
-through yet either — see the next entry.
+merchant learns a payment was paid by reading it back through
+`GET /v1/payments/:id`, or by being the customer the WhatsApp notification is
+addressed to.
 
-`payment.paid` is written durably when a payment is confirmed, but **nothing
-consumes it**. No delivery worker, no retry schedule, no merchant endpoints. What
-is established is that the event cannot be lost after the money commits, not that
-anything reads it. Delivery is the next milestone, and it is deliberately the
-first piece of the cross-repository integration rather than of this one.
+`payment.paid` is delivered to one destination, the WhatsApp Notification
+Platform, configured once per process rather than per organization. What the
+gateway records is that the platform accepted the message; whether WhatsApp
+delivered it is the platform's to report, and the gateway does not read it back.
+An event for a payment with no customer phone is closed as skipped rather than
+delivered anywhere.
 
-The schema is ready for this — a funds-bearing transition requires
-`authenticated_provider_read` evidence, so a forged webhook is structurally
-incapable of marking a payment paid — but none of the machinery is built.
+## The crypto demonstration runs on a local chain
 
-## Only Pix, only BRL, only creation
+The end-to-end flow has been executed against Anvil with a mock six-decimal USDC,
+not against Polygon. CryptoPay's scanning, confirmation counting and signed
+callbacks are the real code paths; what differs is that a local chain has no
+finality tag to wait for and no reorganisations to survive. No crypto payment has
+been sent through this gateway on a public network.
+
+An overpaid crypto payment is not funded. CryptoPay reports what actually
+arrived, the gateway's rule demands that it equal what was asked, and a larger
+amount leaves the payment waiting for an operator — the same rule Pix has, and
+the correct one for a fixed-amount instrument, but a documented gap for rails
+where paying a little more is ordinary.
+
+## Pix and crypto, creation and reading
 
 - No card, no boleto. These are declared unsupported capabilities rather than
   stubbed, so a payment method the gateway cannot serve is refused rather than
   silently accepted.
 - No refunds, despite `RefundCapableProvider` existing on the Appmax adapter.
-- No payment retrieval endpoint. A payment can be created and never read back over
-  HTTP, which is a real gap for a merchant: today the only way to learn a payment
-  was paid is to consume the event that nothing yet delivers.
-- Currency is fixed to BRL at the edge.
+- No listing. A payment is read back by identifier only.
+- Pix is BRL only; crypto is whatever assets the CryptoPay registration is
+  configured to offer, USDC by default.
 
 ## Failover is bounded and does not retry the same provider
 
@@ -115,15 +133,18 @@ rather than retrying the one that failed. That is safe but less capable than the
 taxonomy allows, and with a single provider configured it means a transient
 connection failure fails the payment.
 
-## No dashboard, no hosted checkout, no notifications
+## No dashboard, no hosted checkout
 
 None of the merchant-facing surfaces exist. Specifically absent: the admin
-dashboard and everything configurable through it, the sandbox test mode, the
-hosted checkout page, the notification channel port, and the WhatsApp adapter.
+dashboard and everything configurable through it, the sandbox test mode, and the
+hosted checkout page. The one customer-facing surface is the portfolio site,
+which drives the API directly from the browser through the configured CORS
+origins.
 
-Provider credentials therefore come from environment variables rather than from
-per-organization configuration in the database. Adding a second organization with
-its own Appmax account is not currently possible.
+Provider and notification credentials come from environment variables rather
+than from per-organization configuration in the database. Adding a second
+organization with its own Appmax, CryptoPay or notification account is not
+currently possible.
 
 ## No rate limiting
 
@@ -132,10 +153,10 @@ payments.
 
 ## Configuration is process-wide, not per-tenant
 
-One Appmax registration serves every organization, bound to the single
-environment its credentials belong to. A payment in the other environment finds
-no provider and is refused, which is the safe failure, but it means production and
-sandbox cannot both be served by one process.
+One Appmax registration and one CryptoPay registration serve every organization,
+each bound to the single environment its credentials belong to. A payment in the
+other environment finds no provider and is refused, which is the safe failure, but
+it means production and sandbox cannot both be served by one process.
 
 ## What the tests do and do not prove
 
@@ -165,6 +186,13 @@ They do prove, against real PostgreSQL:
 - A payment cannot be recorded paid on evidence weaker than a provider read, and
   an edge the transition table does not declare is refused whatever the caller
   believes.
+- A crypto payment stores the destination it was shown, reads back only to its
+  owner in its own environment, and its paid event is claimed once per lease,
+  cannot be marked delivered without a reference, and is not writable across
+  tenants.
+
+They prove, against the running stacks, the whole crypto flow listed in
+[e2e-demo.md](e2e-demo.md).
 
 They do not prove:
 

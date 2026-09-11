@@ -27,6 +27,12 @@ if (requestedEnvironment !== 'SANDBOX' && requestedEnvironment !== 'PRODUCTION')
 }
 const environment: 'SANDBOX' | 'PRODUCTION' = requestedEnvironment;
 const organizationName = process.env.SEED_ORGANIZATION_NAME ?? 'Local Sandbox Merchant';
+// The per-organization ceiling, in minor units of whatever the payment asks for.
+// The default suits BRL; a crypto demo in USDC, with six decimals, needs more.
+const maximumPaymentAmountMinor = process.env.SEED_MAXIMUM_PAYMENT_AMOUNT_MINOR ?? '300000';
+if (!/^\d+$/.test(maximumPaymentAmountMinor)) {
+  throw new Error('SEED_MAXIMUM_PAYMENT_AMOUNT_MINOR must be a positive integer.');
+}
 
 const pool = new Pool({
   connectionString: required('OWNER_DATABASE_URL'),
@@ -43,11 +49,13 @@ try {
   const organizationPublicId = `org_${randomIdentifierBody()}`;
 
   const organization = await client.query<{ id: string; public_id: string }>(
-    `INSERT INTO organizations (public_id, name, slug)
-     VALUES ($1, $2, $3)
-     ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name
+    `INSERT INTO organizations (public_id, name, slug, maximum_payment_amount_minor)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (slug) DO UPDATE
+       SET name = EXCLUDED.name,
+           maximum_payment_amount_minor = EXCLUDED.maximum_payment_amount_minor
      RETURNING id, public_id`,
-    [organizationPublicId, organizationName, slug],
+    [organizationPublicId, organizationName, slug, maximumPaymentAmountMinor],
   );
   const organizationRow = organization.rows[0];
   if (organizationRow === undefined) {
