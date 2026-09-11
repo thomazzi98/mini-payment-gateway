@@ -1,0 +1,24 @@
+# The cross-service demonstration overlay.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d --build
+#
+# Joins the api and the worker to `payment-demo`, an external network shared with
+# the CryptoPay and WhatsApp Notification stacks, each brought up from its own
+# repository with its own overlay. The api answers to `payment-gateway` there,
+# which is the hostname CryptoPay delivers signed notifications to. Nothing else
+# changes: the datastores stay on the internal network with no route out.
+#
+# Create the network once: docker network create payment-demo
+services:
+  api:
+    networks:
+      payment-demo:
+        aliases: [payment-gateway]
+
+  worker:
+    networks:
+      payment-demo: {}
+
+networks:
+  payment-demo:
+    external: true

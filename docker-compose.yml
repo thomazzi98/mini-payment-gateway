@@ -105,6 +105,21 @@ services:
       APPMAX_CLIENT_SECRET: ${APPMAX_CLIENT_SECRET:-}
       APPMAX_ENVIRONMENT: ${APPMAX_ENVIRONMENT:-SANDBOX}
       WEBHOOK_PATH_SECRET: ${WEBHOOK_PATH_SECRET:?WEBHOOK_PATH_SECRET is required}
+      # CryptoPay, the crypto provider. Absent by default for the same reason as
+      # Appmax: without them no crypto provider is registered.
+      CRYPTOPAY_BASE_URL: ${CRYPTOPAY_BASE_URL:-}
+      CRYPTOPAY_API_KEY: ${CRYPTOPAY_API_KEY:-}
+      CRYPTOPAY_ENVIRONMENT: ${CRYPTOPAY_ENVIRONMENT:-SANDBOX}
+      CRYPTOPAY_NETWORK: ${CRYPTOPAY_NETWORK:-polygon}
+      CRYPTOPAY_CURRENCIES: ${CRYPTOPAY_CURRENCIES:-USDC}
+      CRYPTOPAY_CALLBACK_URL: ${CRYPTOPAY_CALLBACK_URL:-}
+      CRYPTOPAY_WEBHOOK_SECRETS: ${CRYPTOPAY_WEBHOOK_SECRETS:-}
+      # The WhatsApp Notification Platform the paid event is handed to. Absent by
+      # default: events stay pending, visibly, and no payment is affected.
+      WHATSAPP_NOTIFICATION_BASE_URL: ${WHATSAPP_NOTIFICATION_BASE_URL:-}
+      WHATSAPP_NOTIFICATION_API_KEY: ${WHATSAPP_NOTIFICATION_API_KEY:-}
+      # Browser origins that may call the API directly, for the portfolio demo.
+      HTTP_CORS_ALLOWED_ORIGINS: ${HTTP_CORS_ALLOWED_ORIGINS:-}
     ports:
       - '127.0.0.1:${API_HOST_PORT:-4010}:3000'
     depends_on:
@@ -149,6 +164,20 @@ services:
       # given the API key pepper.
       WEBHOOK_PATH_SECRET: ${WEBHOOK_PATH_SECRET:?WEBHOOK_PATH_SECRET is required}
       RECONCILIATION_POLL_MILLISECONDS: ${RECONCILIATION_POLL_MILLISECONDS:-5000}
+      # CryptoPay, the crypto provider. Absent by default for the same reason as
+      # Appmax: without them no crypto provider is registered.
+      CRYPTOPAY_BASE_URL: ${CRYPTOPAY_BASE_URL:-}
+      CRYPTOPAY_API_KEY: ${CRYPTOPAY_API_KEY:-}
+      CRYPTOPAY_ENVIRONMENT: ${CRYPTOPAY_ENVIRONMENT:-SANDBOX}
+      CRYPTOPAY_NETWORK: ${CRYPTOPAY_NETWORK:-polygon}
+      CRYPTOPAY_CURRENCIES: ${CRYPTOPAY_CURRENCIES:-USDC}
+      CRYPTOPAY_CALLBACK_URL: ${CRYPTOPAY_CALLBACK_URL:-}
+      CRYPTOPAY_WEBHOOK_SECRETS: ${CRYPTOPAY_WEBHOOK_SECRETS:-}
+      # The WhatsApp Notification Platform the paid event is handed to. Absent by
+      # default: events stay pending, visibly, and no payment is affected.
+      WHATSAPP_NOTIFICATION_BASE_URL: ${WHATSAPP_NOTIFICATION_BASE_URL:-}
+      WHATSAPP_NOTIFICATION_API_KEY: ${WHATSAPP_NOTIFICATION_API_KEY:-}
+      EVENT_DELIVERY_POLL_MILLISECONDS: ${EVENT_DELIVERY_POLL_MILLISECONDS:-2000}
     depends_on:
       roles:
         condition: service_completed_successfully

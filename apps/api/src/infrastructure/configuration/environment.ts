@@ -58,6 +58,40 @@ const environmentSchema = baseEnvironmentSchema.extend({
   // authenticated read, and the database refuses to fund a payment on anything
   // less.
   WEBHOOK_PATH_SECRET: z.string().min(24),
+
+  // CryptoPay, the crypto provider. Absent by default, like Appmax: without a
+  // base URL and a key no crypto provider is registered and a crypto payment is
+  // refused with no_provider_available.
+  CRYPTOPAY_BASE_URL: z.string().default(''),
+  CRYPTOPAY_API_KEY: z.string().default(''),
+  // Which environment the key above belongs to. A cp_test_ key is SANDBOX; the
+  // registration is bound to it, so a production payment never reaches a test
+  // chain.
+  CRYPTOPAY_ENVIRONMENT: z.enum(['SANDBOX', 'PRODUCTION']).default('SANDBOX'),
+  // The chain family every crypto payment is created on, and the assets this
+  // gateway offers there. CryptoPay resolves the family to a deployment itself.
+  CRYPTOPAY_NETWORK: z.string().min(1).default('polygon'),
+  CRYPTOPAY_CURRENCIES: z.string().default('USDC'),
+  // Where CryptoPay must deliver its signed notifications: this gateway's own
+  // webhook endpoint, as CryptoPay can reach it.
+  CRYPTOPAY_CALLBACK_URL: z.string().default(''),
+  // The whsec_ secrets CryptoPay signs with, comma separated so a rotation can
+  // overlap. Verified against the raw bytes of every notification; a notification
+  // that does not verify is refused before it is read.
+  CRYPTOPAY_WEBHOOK_SECRETS: z.string().default(''),
+
+  // The WhatsApp Notification Platform, which the paid event is handed to.
+  // Absent by default: without both, events stay pending and are reported as
+  // such, and no payment is affected either way.
+  WHATSAPP_NOTIFICATION_BASE_URL: z.string().default(''),
+  WHATSAPP_NOTIFICATION_API_KEY: z.string().default(''),
+  EVENT_DELIVERY_POLL_MILLISECONDS: z.coerce.number().int().min(250).default(2000),
+  EVENT_DELIVERY_MAXIMUM_ATTEMPTS: z.coerce.number().int().min(1).max(100).default(10),
+
+  // Browser origins allowed to call the API directly, comma separated. Empty
+  // means no browser origin is: the API answers no preflight and sets no CORS
+  // header, which is the right default for a server-to-server surface.
+  HTTP_CORS_ALLOWED_ORIGINS: z.string().default(''),
 });
 
 export type Environment = z.infer<typeof environmentSchema>;
