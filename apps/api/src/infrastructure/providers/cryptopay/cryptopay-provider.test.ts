@@ -67,6 +67,7 @@ const REQUEST = {
   description: 'A digital thing',
   paymentId: 'payment_01hzx',
   merchantReference: 'order-1',
+  network: undefined,
   idempotencyKey: 'key-1',
 };
 
@@ -107,6 +108,18 @@ describe('creating a crypto instrument', () => {
       callbackUrl: CALLBACK_URL,
       metadata: { merchantReference: 'order-1', description: 'A digital thing' },
     });
+  });
+
+  it('declares the network it was registered for and issues on it by default', async () => {
+    expect(DESCRIPTOR.supportedNetworks).toEqual(['polygon']);
+    const { transport, sent } = transportAnswering({
+      transport: { kind: 'response', httpStatus: 201 },
+      body: paymentBody(),
+    });
+
+    await providerOver(transport).createCryptoInstrument({ ...REQUEST, network: 'polygon' });
+
+    expect(sent[0]?.body).toMatchObject({ network: 'polygon' });
   });
 
   it('refuses a currency the gateway cannot express before calling anyone', async () => {

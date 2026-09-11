@@ -41,6 +41,34 @@ export type ProviderSelection =
   | { readonly selected: true; readonly provider: PixPaymentProvider }
   | { readonly selected: false; readonly reason: string };
 
+interface OfferedProvider {
+  readonly code: string;
+  readonly displayName: string;
+  readonly currencies: readonly string[];
+  readonly networks: readonly string[];
+}
+
+function offeredProvider(entry: RegisteredProvider): OfferedProvider {
+  return {
+    code: entry.descriptor.code,
+    displayName: entry.descriptor.displayName,
+    currencies: entry.descriptor.supportedCurrencies,
+    networks: entry.descriptor.supportedNetworks ?? [],
+  };
+}
+
+export interface PaymentOptions {
+  readonly environment: 'SANDBOX' | 'PRODUCTION';
+  readonly methods: readonly {
+    readonly method: PaymentMethod;
+    /**
+     * Empty when nothing can serve the method here. That is an ordinary answer
+     * a caller shows, not an error.
+     */
+    readonly providers: readonly OfferedProvider[];
+  }[];
+}
+
 export type StateReaderSelection =
   | { readonly selected: true; readonly provider: PaymentStateReader }
   | { readonly selected: false; readonly reason: string };
@@ -76,14 +104,46 @@ export class ProviderRegistry {
   public candidatesForCrypto(
     currency: string,
     environment: 'SANDBOX' | 'PRODUCTION',
+    network?: string,
   ): CryptoPaymentProvider[] {
     return this.registered
       .filter((entry) => entry.crypto !== undefined)
       .filter((entry) => entry.environment === environment)
-      .filter((entry) => canServeMethod(entry.descriptor, 'crypto', currency))
+      .filter((entry) => canServeMethod(entry.descriptor, 'crypto', currency, network))
       .toSorted((left, right) => left.priority - right.priority)
       .map((entry) => entry.crypto)
       .filter((provider): provider is CryptoPaymentProvider => provider !== undefined);
+  }
+
+  /**
+   * What this deployment can serve in one environment, for a caller deciding
+   * what to offer before creating anything. Derived from the registrations
+   * rather than declared beside them, so it cannot promise a provider that is
+   * not there.
+   */
+  public paymentOptions(environment: 'SANDBOX' | 'PRODUCTION'): PaymentOptions {
+    const entries = this.registered
+      .filter((entry) => entry.environment === environment)
+      .toSorted((left, right) => left.priority - right.priority);
+    return {
+      environment,
+      methods: [
+        {
+          method: 'crypto',
+          providers: entries
+            .filter((entry) => entry.crypto !== undefined)
+            .filter((entry) => hasCapability(entry.descriptor, 'crypto.create'))
+            .map((entry) => offeredProvider(entry)),
+        },
+        {
+          method: 'pix',
+          providers: entries
+            .filter((entry) => entry.pix !== undefined)
+            .filter((entry) => hasCapability(entry.descriptor, 'pix.create'))
+            .map((entry) => offeredProvider(entry)),
+        },
+      ],
+    };
   }
 
   /**

@@ -127,6 +127,11 @@ export type CreatePaymentInput = {
   | {
       readonly paymentMethod: 'crypto';
       /**
+       * Which network the merchant wants the destination on, or any the
+       * registered providers offer.
+       */
+      readonly network: string | undefined;
+      /**
        * Optional: the crypto rails need nothing about the payer. What is given is
        * kept only so the customer can be told when the money arrives.
        */
@@ -336,7 +341,7 @@ export async function createPayment(
   const candidates = candidatesFor(input, dependencies.providers, claimed.publicId);
   if (candidates.length === 0) {
     return await abandonPayment(input, dependencies, claimed.publicId, claimed.paymentId, {
-      reason: `No configured provider can serve ${input.paymentMethod} in ${input.currency} for ${input.environment}.`,
+      reason: describeUnservable(input),
       failureCode: 'no_provider_available',
       responseStatus: RESPONSE_STATUS.no_provider,
       kind: 'no_provider',
@@ -491,8 +496,14 @@ function candidatesFor(
       .map((provider) => pixCandidate(provider, input));
   }
   return registry
-    .candidatesForCrypto(input.currency, input.environment)
+    .candidatesForCrypto(input.currency, input.environment, input.network)
     .map((provider) => cryptoCandidate(provider, input, paymentId));
+}
+
+function describeUnservable(input: CreatePaymentInput): string {
+  const where =
+    input.paymentMethod === 'crypto' && input.network !== undefined ? ` on ${input.network}` : '';
+  return `No configured provider can serve ${input.paymentMethod} in ${input.currency}${where} for ${input.environment}.`;
 }
 
 function pixCandidate(
@@ -518,7 +529,7 @@ function pixCandidate(
 
 function cryptoCandidate(
   provider: CryptoPaymentProvider,
-  input: CreatePaymentInput,
+  input: CreatePaymentInput & { readonly paymentMethod: 'crypto' },
   paymentId: string,
 ): RoutingCandidate {
   return {
@@ -530,6 +541,7 @@ function cryptoCandidate(
         description: input.description,
         paymentId,
         merchantReference: input.merchantReference,
+        network: input.network,
         // Our own claim key, so a retry of the same merchant request reaches the
         // provider as the same request and is answered with the same destination.
         idempotencyKey: input.idempotencyKey,

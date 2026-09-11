@@ -53,6 +53,11 @@ export interface CreateCryptoInstrumentRequest {
   readonly paymentId: string;
   readonly merchantReference: string;
   /**
+   * Which of the provider's declared networks to issue on. Absent, the provider
+   * uses the one it was registered for.
+   */
+  readonly network: string | undefined;
+  /**
    * The key the provider deduplicates on. A retried creation after a timeout
    * must be given the same one, or the customer is handed two destinations for
    * one order.

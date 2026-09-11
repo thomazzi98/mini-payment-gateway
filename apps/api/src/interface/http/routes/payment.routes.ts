@@ -83,6 +83,12 @@ const paymentRequestSchema = z.discriminatedUnion('paymentMethod', [
       // Which assets exist is the registry's to say; the edge only refuses a
       // code that could not be one.
       currency: z.string().regex(/^[A-Z]{3,5}$/),
+      // A network as the provider names it, matched against what the registry
+      // offers; absent, the provider's own is used.
+      network: z
+        .string()
+        .regex(/^[a-z][a-z0-9-]{1,39}$/)
+        .optional(),
       customer: cryptoCustomerSchema.optional(),
     })
     .strict(),
@@ -196,6 +202,7 @@ export function registerPaymentRoutes(
         : {
             ...common,
             paymentMethod: 'crypto',
+            network: parsed.data.network,
             customerPhone: parsed.data.customer?.phone,
           };
 
@@ -203,6 +210,35 @@ export function registerPaymentRoutes(
 
     const rendered = renderOutcome(outcome, requestId);
     return reply.code(rendered.httpStatus).send(rendered.body);
+  });
+
+  // What this deployment can serve for the caller's environment, so a client
+  // offers only what will not be refused. Read scope: it discloses nothing a
+  // payment read would not.
+  server.get('/v1/payment-options', async (request, reply) => {
+    const authenticated = await authenticate(
+      request.headers.authorization,
+      request.id,
+      dependencies,
+    );
+    if ('httpStatus' in authenticated) {
+      return reply.code(authenticated.httpStatus).send(authenticated.body);
+    }
+    const missing = missingScopes(authenticated.principal, ['payments:read']);
+    if (missing.length > 0) {
+      return reply.code(403).send(
+        apiError({
+          httpStatus: 403,
+          type: 'authorization_error',
+          code: 'insufficient_scope',
+          message: `This API key is missing the required scope: ${missing.join(', ')}.`,
+          requestId: request.id,
+        }).body,
+      );
+    }
+    return reply
+      .code(200)
+      .send(dependencies.payments.providers.paymentOptions(authenticated.principal.environment));
   });
 
   server.get<{ Params: { paymentId: string } }>(

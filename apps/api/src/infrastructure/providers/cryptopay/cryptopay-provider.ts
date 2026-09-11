@@ -46,6 +46,7 @@ export function cryptoPayDescriptor(options: CryptoPayDescriptorOptions): Provid
     displayName: `CryptoPay (${options.network})`,
     capabilities: ['crypto.create', 'crypto.status', 'webhook.receive'],
     supportedCurrencies: options.currencies,
+    supportedNetworks: [options.network],
     // Creation carries an Idempotency-Key that CryptoPay honours byte for byte,
     // so a retried request after a timeout is answered with the same payment.
     instrumentCreationIsIdempotent: true,
@@ -209,7 +210,7 @@ export class CryptoPayProvider implements CryptoPaymentProvider {
       idempotencyKey: request.idempotencyKey,
       body: {
         externalReference: request.paymentId,
-        network: this.network,
+        network: request.network ?? this.network,
         currency,
         amount: formatDecimalAmount(request.amountMinor, currency),
         callbackUrl: this.callbackUrl,

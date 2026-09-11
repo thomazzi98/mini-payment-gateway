@@ -55,6 +55,7 @@ const CRYPTO_DESCRIPTOR: ProviderDescriptor = {
   displayName: 'Test Crypto',
   capabilities: ['crypto.create', 'crypto.status'],
   supportedCurrencies: ['USDC'],
+  supportedNetworks: ['polygon'],
   instrumentCreationIsIdempotent: true,
 };
 
@@ -921,5 +922,115 @@ describe('reading a payment', () => {
     const response = await get(harness, { paymentId: SNAPSHOT.publicId });
 
     expect(response.statusCode).toBe(401);
+  });
+});
+
+describe('choosing a network', () => {
+  const CRYPTO_BODY = {
+    amount: 1_500_000,
+    currency: 'USDC',
+    paymentMethod: 'crypto',
+    reference: 'order-1',
+    description: 'A digital thing',
+  };
+
+  it('forwards a network the provider declared', async () => {
+    const provider = cryptoProviderReturning(GOOD_CRYPTO_INSTRUMENT);
+    const harness = buildHarness({ cryptoProvider: provider });
+
+    const response = await post(harness, {
+      key: harness.plaintextKey,
+      idempotencyKey: 'key-1',
+      body: { ...CRYPTO_BODY, network: 'polygon' },
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(provider.requests[0]).toMatchObject({ network: 'polygon' });
+  });
+
+  it('refuses a network nobody declared, naming it', async () => {
+    const harness = buildHarness({
+      cryptoProvider: cryptoProviderReturning(GOOD_CRYPTO_INSTRUMENT),
+    });
+
+    const response = await post(harness, {
+      key: harness.plaintextKey,
+      idempotencyKey: 'key-1',
+      body: { ...CRYPTO_BODY, network: 'solana' },
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(paymentOf(response).failureCode).toBe('no_provider_available');
+    expect(paymentOf(response).failureReason).toContain('on solana');
+  });
+
+  it('refuses a network that could not be one at the edge', async () => {
+    const harness = buildHarness({
+      cryptoProvider: cryptoProviderReturning(GOOD_CRYPTO_INSTRUMENT),
+    });
+
+    const response = await post(harness, {
+      key: harness.plaintextKey,
+      idempotencyKey: 'key-1',
+      body: { ...CRYPTO_BODY, network: 'Polygon Mainnet' },
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(errorOf(response).param).toBe('network');
+  });
+});
+
+const getOptions = (harness: Harness, key?: string) =>
+  harness.server.inject({
+    method: 'GET',
+    url: '/v1/payment-options',
+    headers: { ...(key !== undefined && { authorization: `Bearer ${key}` }) },
+  });
+
+describe('payment options', () => {
+  it('requires an authenticated key with the read scope', async () => {
+    const harness = buildHarness({ scopes: ['payments:write'] });
+    const anonymous = await getOptions(harness);
+    const wrongScope = await getOptions(harness, harness.plaintextKey);
+    expect(anonymous.statusCode).toBe(401);
+    expect(wrongScope.statusCode).toBe(403);
+  });
+
+  it('answers what the registry can serve for the key environment', async () => {
+    const harness = buildHarness({
+      scopes: ['payments:read'],
+      cryptoProvider: cryptoProviderReturning(GOOD_CRYPTO_INSTRUMENT),
+    });
+
+    const response = await getOptions(harness, harness.plaintextKey);
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      environment: 'SANDBOX',
+      methods: [
+        {
+          method: 'crypto',
+          providers: [
+            {
+              code: 'test-crypto',
+              displayName: 'Test Crypto',
+              currencies: ['USDC'],
+              networks: ['polygon'],
+            },
+          ],
+        },
+        {
+          method: 'pix',
+          providers: [
+            {
+              code: 'test-provider',
+              displayName: 'Test Provider',
+              currencies: ['BRL'],
+              networks: [],
+            },
+          ],
+        },
+      ],
+    });
   });
 });

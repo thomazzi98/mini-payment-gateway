@@ -55,6 +55,11 @@ export interface ProviderDescriptor {
   readonly capabilities: readonly ProviderCapability[];
   readonly supportedCurrencies: readonly string[];
   /**
+   * The networks a crypto provider can issue destinations on, as the provider
+   * names them. Absent on rails that have no notion of a network.
+   */
+  readonly supportedNetworks?: readonly string[];
+  /**
    * Whether creating a payment instrument can be retried safely after an
    * uncertain outcome. Appmax cannot: order creation carries no idempotency key
    * and no external reference, so a retry may create a second order.
@@ -73,7 +78,11 @@ export function canServeMethod(
   descriptor: ProviderDescriptor,
   method: PaymentMethod,
   currency: string,
+  network?: string,
 ): boolean {
+  if (network !== undefined && !(descriptor.supportedNetworks ?? []).includes(network)) {
+    return false;
+  }
   return (
     hasCapability(descriptor, capabilityForMethod(method)) &&
     descriptor.supportedCurrencies.includes(currency)
