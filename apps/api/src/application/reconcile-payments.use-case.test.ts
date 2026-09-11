@@ -223,7 +223,7 @@ describe('an uncertain payment that stays uncertain', () => {
     );
 
     expect(run.resolutions[0]?.kind).toBe('cannot_inquire');
-    expect(store.calls.deferred[0]?.note).toContain('pix.status');
+    expect(store.calls.deferred[0]?.note).toContain('status capability');
   });
 
   it('cannot inquire about a provider configured for the other environment', async () => {

@@ -42,6 +42,7 @@ function commandFor(overrides: Partial<CreatePaymentCommand> = {}): CreatePaymen
     paymentMethod: 'pix',
     currency: 'BRL',
     expectedAmountMinor: 10_000n,
+    customerPhone: undefined,
     idempotencyKey: `key-${publicIdentifierFor('k')}`,
     requestPath: '/v1/payments',
     requestBody: { amount: 10_000, currency: 'BRL', reference },
@@ -183,6 +184,7 @@ async function runCycle(outcome: {
     responseStatus: outcome.responseStatus,
     responseBody: { id: 'pay_rendered', status: outcome.toStatus },
     instrumentExpiresAt: undefined,
+    instrument: undefined,
   });
 
   return { ...created, attemptId, providerReference };

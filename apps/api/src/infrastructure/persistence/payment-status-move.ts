@@ -42,6 +42,12 @@ export interface PaymentStatusMove {
     readonly environment: string;
     readonly currency: string;
     readonly merchantReference: string;
+    readonly paymentMethod: string;
+    /**
+     * Who to tell. Absent when the merchant gave no number, in which case the
+     * event is still written and delivery records that nobody could be told.
+     */
+    readonly customerPhone: string | undefined;
     readonly providerCode: string | undefined;
     readonly providerReference: string | undefined;
   };
@@ -142,9 +148,11 @@ async function recordPaidEvent(
     organizationId: move.organizationId,
     merchantReference: context.merchantReference,
     environment: context.environment,
+    paymentMethod: context.paymentMethod,
     currency: context.currency,
     amountMinor: capture.amountMinor.toString(),
     paidAt: capture.paidAt.toISOString(),
+    customerPhone: context.customerPhone ?? null,
     provider: context.providerCode ?? null,
     providerReference: context.providerReference ?? null,
     paymentAttemptId: move.attemptId,

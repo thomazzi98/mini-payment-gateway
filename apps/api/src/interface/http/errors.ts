@@ -31,6 +31,7 @@ export type ErrorCode =
   | 'duplicate_merchant_reference'
   | 'no_provider_available'
   | 'not_found'
+  | 'payment_not_found'
   | 'provider_rejected'
   | 'provider_outcome_unknown'
   | 'internal_error';

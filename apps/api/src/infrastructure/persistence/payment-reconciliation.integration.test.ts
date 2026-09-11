@@ -40,6 +40,7 @@ function commandFor(overrides: Partial<CreatePaymentCommand> = {}): CreatePaymen
     paymentMethod: 'pix',
     currency: 'BRL',
     expectedAmountMinor: 10_000n,
+    customerPhone: undefined,
     idempotencyKey: `key-${publicIdentifierFor('k')}`,
     requestPath: '/v1/payments',
     requestBody: { amount: 10_000, currency: 'BRL', reference },
@@ -87,6 +88,7 @@ async function uncertainPayment(
     responseStatus: 202,
     responseBody: { id: 'pay_rendered', status: 'unknown' },
     instrumentExpiresAt: undefined,
+    instrument: undefined,
   });
 
   return { paymentId: created.paymentId, attemptId, providerReference };

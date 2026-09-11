@@ -13,6 +13,8 @@
 export const PROVIDER_CAPABILITIES = [
   'pix.create',
   'pix.status',
+  'crypto.create',
+  'crypto.status',
   'card.create',
   'card.tokenize',
   'boleto.create',
@@ -30,7 +32,7 @@ export function isProviderCapability(candidate: unknown): candidate is ProviderC
   );
 }
 
-export const PAYMENT_METHODS = ['pix', 'card', 'boleto'] as const;
+export const PAYMENT_METHODS = ['pix', 'crypto', 'card', 'boleto'] as const;
 export type PaymentMethod = (typeof PAYMENT_METHODS)[number];
 
 /**
@@ -38,6 +40,7 @@ export type PaymentMethod = (typeof PAYMENT_METHODS)[number];
  */
 const METHOD_REQUIREMENTS: Readonly<Record<PaymentMethod, ProviderCapability>> = {
   pix: 'pix.create',
+  crypto: 'crypto.create',
   card: 'card.create',
   boleto: 'boleto.create',
 };

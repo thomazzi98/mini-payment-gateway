@@ -8,10 +8,14 @@ import type {
 } from '../../../application/create-payment.use-case.js';
 import type { StoredApiKey } from '../../../application/ports/api-key.repository.js';
 import type {
+  CryptoInstrument,
+  CryptoPaymentProvider,
   PixInstrument,
   PixPaymentProvider,
   ProviderResult,
 } from '../../../application/ports/payment-provider.js';
+import type { PaymentSnapshot } from '../../../application/ports/payment-read.repository.js';
+import type { PaymentDetail } from '../../../application/read-payment.use-case.js';
 import { ProviderRegistry } from '../../../application/provider-registry.js';
 import type { ApiKeyScope } from '../../../domain/api-key/api-key.js';
 import { payableBrCode } from '../../../domain/pix/br-code.test-support.js';
@@ -44,6 +48,99 @@ const GOOD_INSTRUMENT: ProviderResult<PixInstrument> = {
     qrCodeImageDataUri: 'data:image/png;base64,AAAA',
     expiresAt: new Date('2026-09-09T18:30:00.000Z'),
   },
+};
+
+const CRYPTO_DESCRIPTOR: ProviderDescriptor = {
+  code: 'test-crypto',
+  displayName: 'Test Crypto',
+  capabilities: ['crypto.create', 'crypto.status'],
+  supportedCurrencies: ['USDC'],
+  instrumentCreationIsIdempotent: true,
+};
+
+const GOOD_CRYPTO_INSTRUMENT: ProviderResult<CryptoInstrument> = {
+  outcome: 'success',
+  providerReference: 'pay_01K4QW6ZR2M8X4T7YQ0C3D5B9N',
+  value: {
+    network: 'polygon',
+    asset: 'USDC',
+    destinationAddress: '0x1077840bd639dbd769cb7dde82235d265e73f28a',
+    paymentUri: 'ethereum:0x5fbd@31337/transfer?address=0x1077&uint256=1500000',
+    qrCodeImageDataUri: 'data:image/png;base64,BBBB',
+    amountMinor: 1_500_000n,
+    expiresAt: new Date('2026-09-09T18:30:00.000Z'),
+  },
+};
+
+function cryptoProviderReturning(
+  result: ProviderResult<CryptoInstrument>,
+): CryptoPaymentProvider & { requests: unknown[] } {
+  const requests: unknown[] = [];
+  return {
+    requests,
+    descriptor: CRYPTO_DESCRIPTOR,
+    createCryptoInstrument: (request) => {
+      requests.push(request);
+      return Promise.resolve(result);
+    },
+    readPaymentState: () =>
+      Promise.resolve({ outcome: 'unknown_outcome' as const, reason: 'not used here' }),
+  };
+}
+
+const SNAPSHOT: PaymentSnapshot = {
+  publicId: 'pay_0123456789abcdefghjkmnpqrs',
+  status: 'paid',
+  paymentMethod: 'crypto',
+  environment: 'SANDBOX',
+  currency: 'USDC',
+  expectedAmountMinor: 1_500_000n,
+  capturedAmountMinor: 1_500_000n,
+  merchantReference: 'order-1',
+  createdAt: new Date('2026-09-11T00:00:00.000Z'),
+  updatedAt: new Date('2026-09-11T00:05:00.000Z'),
+  expiresAt: new Date('2026-09-11T00:30:00.000Z'),
+  paidAt: new Date('2026-09-11T00:04:00.000Z'),
+  providerCode: 'cryptopay',
+  providerReference: 'pay_01K4QW6ZR2M8X4T7YQ0C3D5B9N',
+  instrument: {
+    type: 'crypto',
+    network: 'polygon',
+    asset: 'USDC',
+    destinationAddress: '0x1077840bd639dbd769cb7dde82235d265e73f28a',
+    paymentUri: 'ethereum:0x5fbd@31337/transfer?address=0x1077&uint256=1500000',
+    qrCodeImageDataUri: 'data:image/png;base64,BBBB',
+  },
+  transitions: [
+    {
+      sequence: 3,
+      fromStatus: 'awaiting_payment',
+      toStatus: 'paid',
+      trigger: 'PAYMENT_CONFIRMED',
+      evidenceClass: 'authenticated_provider_read',
+      reason: 'Provider reported PAID.',
+      occurredAt: new Date('2026-09-11T00:04:00.000Z'),
+    },
+  ],
+  providerNotifications: [
+    {
+      provider: 'cryptopay',
+      eventType: 'payment.completed',
+      receivedAt: new Date('2026-09-11T00:03:59.000Z'),
+      disposition: 'scheduled_read',
+    },
+  ],
+  events: [
+    {
+      type: 'payment.paid',
+      occurredAt: new Date('2026-09-11T00:04:00.000Z'),
+      deliveryStatus: 'delivered',
+      deliveryReference: 'notification-1',
+      attempts: 1,
+      publishedAt: new Date('2026-09-11T00:04:02.000Z'),
+      lastFailure: undefined,
+    },
+  ],
 };
 
 function providerReturning(result: ProviderResult<PixInstrument>): PixPaymentProvider {
@@ -84,6 +181,8 @@ interface Harness {
   readonly server: ApplicationServer;
   readonly plaintextKey: string;
   readonly received: unknown[];
+  readonly reads: unknown[];
+  readonly outcomes: unknown[];
 }
 
 function buildHarness(options: {
@@ -100,6 +199,11 @@ function buildHarness(options: {
    */
   withoutProvider?: boolean;
   claim?: ClaimResult;
+  cryptoProvider?: CryptoPaymentProvider;
+  /**
+   * What a read finds. The query is recorded so scoping can be asserted.
+   */
+  snapshot?: PaymentSnapshot;
 }): Harness {
   const generated = generateApiKey(options.environment ?? 'SANDBOX');
   const stored: StoredApiKey = {
@@ -114,6 +218,8 @@ function buildHarness(options: {
   };
 
   const received: unknown[] = [];
+  const reads: unknown[] = [];
+  const outcomes: unknown[] = [];
   const server = Fastify() as unknown as ApplicationServer;
   registerErrorHandling(server);
 
@@ -130,9 +236,31 @@ function buildHarness(options: {
             pix: provider,
             priority: 1,
           },
+          ...(options.cryptoProvider === undefined
+            ? []
+            : [
+                {
+                  descriptor: options.cryptoProvider.descriptor,
+                  environment: options.environment ?? 'SANDBOX',
+                  crypto: options.cryptoProvider,
+                  priority: 1,
+                },
+              ]),
         ]);
 
   registerPaymentRoutes(server, {
+    paymentReads: {
+      store: {
+        findByPublicId: (query) => {
+          reads.push(query);
+          return Promise.resolve(
+            options.snapshot !== undefined && query.publicId === options.snapshot.publicId
+              ? options.snapshot
+              : undefined,
+          );
+        },
+      },
+    },
     authentication: {
       repository: {
         findByIdentifier: (identifier) =>
@@ -152,14 +280,27 @@ function buildHarness(options: {
           return Promise.resolve(options.claim ?? CLAIM_CREATED);
         },
         openAttempt: () => Promise.resolve('attempt-1'),
-        applyProviderOutcome: () => Promise.resolve(),
+        applyProviderOutcome: (command) => {
+          outcomes.push(command);
+          return Promise.resolve();
+        },
         failRouting: () => Promise.resolve(),
       },
       providers,
     },
   });
 
-  return { server, plaintextKey: generated.plaintext.expose(), received };
+  return { server, plaintextKey: generated.plaintext.expose(), received, reads, outcomes };
+}
+
+async function get(harness: Harness, options: { key?: string; paymentId: string }) {
+  return harness.server.inject({
+    method: 'GET',
+    url: `/v1/payments/${options.paymentId}`,
+    headers: {
+      ...(options.key !== undefined && { authorization: `Bearer ${options.key}` }),
+    },
+  });
 }
 
 async function post(
@@ -444,7 +585,10 @@ describe('the outcome mapping', () => {
     expect(response.statusCode).toBe(201);
     const body = paymentOf(response);
     expect(body.status).toBe('awaiting_payment');
-    expect(body.instrument?.copyAndPasteCode).toBe(payableBrCode('10.00'));
+    expect(body.instrument?.type).toBe('pix');
+    expect(body.instrument?.type === 'pix' && body.instrument.copyAndPasteCode).toBe(
+      payableBrCode('10.00'),
+    );
     // A JSON number cannot hold every amount this gateway accepts without losing
     // precision, so money crosses the wire as a string.
     expect(body.amountMinor).toBe('1000');
@@ -549,5 +693,233 @@ describe('idempotency reaches the caller unchanged', () => {
 
     expect(response.statusCode).toBe(409);
     expect(errorOf(response).code).toBe('duplicate_merchant_reference');
+  });
+});
+
+describe('crypto payments', () => {
+  const CRYPTO_BODY = {
+    amount: 1_500_000,
+    currency: 'USDC',
+    paymentMethod: 'crypto',
+    reference: 'order-1',
+    description: 'A digital thing',
+    customer: { phone: '+5515999998888' },
+  };
+
+  it('answers 201 with the destination, the URI and the QR code', async () => {
+    const provider = cryptoProviderReturning(GOOD_CRYPTO_INSTRUMENT);
+    const harness = buildHarness({ cryptoProvider: provider });
+
+    const response = await post(harness, {
+      key: harness.plaintextKey,
+      idempotencyKey: 'key-1',
+      body: CRYPTO_BODY,
+    });
+
+    expect(response.statusCode).toBe(201);
+    const body = paymentOf(response);
+    expect(body.paymentMethod).toBe('crypto');
+    expect(body.status).toBe('awaiting_payment');
+    expect(body.currency).toBe('USDC');
+    expect(body.amountMinor).toBe('1500000');
+    expect(body.instrument).toEqual({
+      type: 'crypto',
+      network: 'polygon',
+      asset: 'USDC',
+      destinationAddress: '0x1077840bd639dbd769cb7dde82235d265e73f28a',
+      paymentUri: 'ethereum:0x5fbd@31337/transfer?address=0x1077&uint256=1500000',
+      qrCodeImageDataUri: 'data:image/png;base64,BBBB',
+      expiresAt: '2026-09-09T18:30:00.000Z',
+    });
+
+    // The provider is asked to correlate on our payment id and to deduplicate
+    // on our idempotency key; the phone stays with us for the paid event.
+    expect(provider.requests[0]).toMatchObject({
+      paymentId: 'pay_0123456789abcdefghjkmnpqrs',
+      merchantReference: 'order-1',
+      idempotencyKey: 'key-1',
+      amountMinor: 1_500_000n,
+      currency: 'USDC',
+    });
+    expect(harness.received[0]).toMatchObject({
+      paymentMethod: 'crypto',
+      customerPhone: '+5515999998888',
+    });
+    expect(harness.outcomes[0]).toMatchObject({
+      providerReference: 'pay_01K4QW6ZR2M8X4T7YQ0C3D5B9N',
+      instrument: { type: 'crypto' },
+    });
+  });
+
+  it('needs no customer at all', async () => {
+    const harness = buildHarness({
+      cryptoProvider: cryptoProviderReturning(GOOD_CRYPTO_INSTRUMENT),
+    });
+    const withoutCustomer = Object.fromEntries(
+      Object.entries(CRYPTO_BODY).filter(([field]) => field !== 'customer'),
+    );
+
+    const response = await post(harness, {
+      key: harness.plaintextKey,
+      idempotencyKey: 'key-1',
+      body: withoutCustomer,
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(harness.received[0]).toMatchObject({ customerPhone: undefined });
+  });
+
+  it('refuses a phone that is not international', async () => {
+    const harness = buildHarness({
+      cryptoProvider: cryptoProviderReturning(GOOD_CRYPTO_INSTRUMENT),
+    });
+
+    const response = await post(harness, {
+      key: harness.plaintextKey,
+      idempotencyKey: 'key-1',
+      body: { ...CRYPTO_BODY, customer: { phone: '15999998888' } },
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(errorOf(response).param).toBe('customer.phone');
+  });
+
+  it('still requires the full customer for pix', async () => {
+    const harness = buildHarness({});
+
+    const response = await post(harness, {
+      key: harness.plaintextKey,
+      idempotencyKey: 'key-1',
+      body: { ...VALID_BODY, customer: { phone: '+5515999998888' } },
+    });
+
+    expect(response.statusCode).toBe(422);
+  });
+
+  it('never shows a destination that asks for a different amount', async () => {
+    const harness = buildHarness({
+      cryptoProvider: cryptoProviderReturning({
+        ...GOOD_CRYPTO_INSTRUMENT,
+        value: { ...GOOD_CRYPTO_INSTRUMENT.value, amountMinor: 1_600_000n },
+      }),
+    });
+
+    const response = await post(harness, {
+      key: harness.plaintextKey,
+      idempotencyKey: 'key-1',
+      body: CRYPTO_BODY,
+    });
+
+    expect(response.statusCode).toBe(202);
+    expect(paymentOf(response).status).toBe('unknown');
+    expect(paymentOf(response).instrument).toBeUndefined();
+  });
+
+  it('reports no provider when only pix is configured', async () => {
+    const harness = buildHarness({});
+
+    const response = await post(harness, {
+      key: harness.plaintextKey,
+      idempotencyKey: 'key-1',
+      body: CRYPTO_BODY,
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(paymentOf(response).failureCode).toBe('no_provider_available');
+  });
+});
+
+describe('reading a payment', () => {
+  it('requires the payments:read scope', async () => {
+    const harness = buildHarness({ scopes: ['payments:write'], snapshot: SNAPSHOT });
+
+    const response = await get(harness, {
+      key: harness.plaintextKey,
+      paymentId: SNAPSHOT.publicId,
+    });
+
+    expect(response.statusCode).toBe(403);
+    expect(harness.reads).toHaveLength(0);
+  });
+
+  it('answers with the gateway record and its three histories', async () => {
+    const harness = buildHarness({ scopes: ['payments:read'], snapshot: SNAPSHOT });
+
+    const response = await get(harness, {
+      key: harness.plaintextKey,
+      paymentId: SNAPSHOT.publicId,
+    });
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json<PaymentDetail>();
+    expect(body.id).toBe(SNAPSHOT.publicId);
+    expect(body.status).toBe('paid');
+    expect(body.capturedAmountMinor).toBe('1500000');
+    expect(body.paidAt).toBe('2026-09-11T00:04:00.000Z');
+    expect(body.provider).toBe('cryptopay');
+    expect(body.instrument?.type).toBe('crypto');
+    expect(body.transitions[0]).toEqual({
+      sequence: 3,
+      fromStatus: 'awaiting_payment',
+      toStatus: 'paid',
+      trigger: 'PAYMENT_CONFIRMED',
+      evidenceClass: 'authenticated_provider_read',
+      reason: 'Provider reported PAID.',
+      occurredAt: '2026-09-11T00:04:00.000Z',
+    });
+    expect(body.providerNotifications[0]?.disposition).toBe('scheduled_read');
+    expect(body.events[0]?.delivery).toEqual({
+      channel: 'whatsapp',
+      status: 'delivered',
+      attempts: 1,
+      reference: 'notification-1',
+      publishedAt: '2026-09-11T00:04:02.000Z',
+    });
+  });
+
+  it('scopes the read by the key, never by the caller', async () => {
+    const harness = buildHarness({
+      scopes: ['payments:read'],
+      environment: 'PRODUCTION',
+      snapshot: SNAPSHOT,
+    });
+
+    await get(harness, { key: harness.plaintextKey, paymentId: SNAPSHOT.publicId });
+
+    expect(harness.reads[0]).toEqual({
+      organizationId: 'organization-1',
+      environment: 'PRODUCTION',
+      publicId: SNAPSHOT.publicId,
+    });
+  });
+
+  it('answers 404 for a payment it does not find', async () => {
+    const harness = buildHarness({ scopes: ['payments:read'] });
+
+    const response = await get(harness, {
+      key: harness.plaintextKey,
+      paymentId: 'pay_0123456789abcdefghjkmnpqrs',
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(errorOf(response).code).toBe('payment_not_found');
+  });
+
+  it('answers an identifier that could not be one exactly like a missing one', async () => {
+    const harness = buildHarness({ scopes: ['payments:read'], snapshot: SNAPSHOT });
+
+    const response = await get(harness, { key: harness.plaintextKey, paymentId: 'not-an-id' });
+
+    expect(response.statusCode).toBe(404);
+    expect(errorOf(response).code).toBe('payment_not_found');
+    expect(harness.reads).toHaveLength(0);
+  });
+
+  it('refuses an unauthenticated read', async () => {
+    const harness = buildHarness({ scopes: ['payments:read'], snapshot: SNAPSHOT });
+
+    const response = await get(harness, { paymentId: SNAPSHOT.publicId });
+
+    expect(response.statusCode).toBe(401);
   });
 });

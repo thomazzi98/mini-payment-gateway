@@ -25,6 +25,13 @@ import type { ApplicationServer } from '../server-types.js';
 export interface WebhookRouteDependencies {
   readonly appmax: WebhookIngestionDependencies;
   /**
+   * CryptoPay signs every notification, so its endpoint needs no secret in the
+   * path: the signature is verified against the raw bytes before anything is
+   * read, and one that does not verify is refused. The notification is still
+   * never evidence; it schedules the same authenticated read Appmax's does.
+   */
+  readonly cryptopay: WebhookIngestionDependencies;
+  /**
    * The unguessable segment of the notification URL, as configured with the
    * provider.
    */
@@ -76,45 +83,60 @@ export function registerWebhookRoutes(
           );
         }
 
-        const rawBody = rawBodyOf(request.body);
-        const outcome = await ingestProviderWebhook(
-          rawBody,
-          headersOf(request),
-          dependencies.appmax,
-        );
-
-        request.log.info(
-          {
-            providerCode: 'appmax',
-            outcome: outcome.kind,
-            ...('paymentId' in outcome && { paymentId: outcome.paymentId }),
-          },
-          'provider notification received',
-        );
-
-        if (outcome.kind === 'unreadable') {
-          // 400, and nothing else. A body this provider does not send is a caller
-          // error, and repeating it back would echo unvalidated content.
-          return reply.code(400).send(
-            apiError({
-              httpStatus: 400,
-              type: 'invalid_request_error',
-              code: 'invalid_request',
-              message: 'The notification could not be read.',
-              requestId,
-            }).body,
-          );
-        }
-
-        // Everything the provider can legitimately send answers the same way, so
-        // a sender learns nothing from the reply about whether a payment exists,
-        // whether it was already known, or whom it belongs to. Appmax retries on
-        // anything other than a success, and there is nothing here worth retrying.
-        return reply.code(202).send({ received: true });
+        return ingest(request, reply, dependencies.appmax);
       },
+    );
+
+    scope.post<{ Body: unknown }>('/v1/webhooks/cryptopay', async (request, reply) =>
+      ingest(request, reply, dependencies.cryptopay),
     );
     done();
   });
+}
+
+async function ingest(
+  request: {
+    readonly id: string;
+    readonly body: unknown;
+    readonly headers: Record<string, string | string[] | undefined>;
+    readonly log: { info(details: Record<string, unknown>, message: string): void };
+  },
+  reply: { code(status: number): { send(body: unknown): unknown } },
+  ingestion: WebhookIngestionDependencies,
+): Promise<unknown> {
+  const requestId = request.id;
+  const rawBody = rawBodyOf(request.body);
+  const outcome = await ingestProviderWebhook(rawBody, headersOf(request), ingestion);
+
+  request.log.info(
+    {
+      providerCode: ingestion.receiver.providerCode,
+      outcome: outcome.kind,
+      ...('paymentId' in outcome && { paymentId: outcome.paymentId }),
+    },
+    'provider notification received',
+  );
+
+  if (outcome.kind === 'unreadable') {
+    // 400, and nothing else. A body this provider does not send, or a signature
+    // that does not verify, is a caller error, and repeating it back would echo
+    // unvalidated content.
+    return reply.code(400).send(
+      apiError({
+        httpStatus: 400,
+        type: 'invalid_request_error',
+        code: 'invalid_request',
+        message: 'The notification could not be read.',
+        requestId,
+      }).body,
+    );
+  }
+
+  // Everything the provider can legitimately send answers the same way, so a
+  // sender learns nothing from the reply about whether a payment exists, whether
+  // it was already known, or whom it belongs to. Providers retry on anything
+  // other than a success, and there is nothing here worth retrying.
+  return reply.code(202).send({ received: true });
 }
 
 /**

@@ -72,6 +72,7 @@ function buildHarness(options: { match?: MatchedPayment; duplicate?: boolean } =
   registerErrorHandling(server);
   registerWebhookRoutes(server, {
     appmax: { receiver: receiver(), store },
+    cryptopay: { receiver: receiver(), store },
     pathSecret: new Secret(SECRET),
   });
 
@@ -217,15 +218,17 @@ describe('the raw body reaches the receiver', () => {
 
     const server = Fastify() as unknown as ApplicationServer;
     registerErrorHandling(server);
-    registerWebhookRoutes(server, {
-      appmax: {
-        receiver: spy,
-        store: {
-          findPaymentByProviderReference: () => Promise.resolve(undefined),
-          recordEvent: () => Promise.resolve('recorded'),
-          bringInquiryForward: () => Promise.resolve(),
-        },
+    const ingestion = {
+      receiver: spy,
+      store: {
+        findPaymentByProviderReference: () => Promise.resolve(undefined),
+        recordEvent: () => Promise.resolve('recorded' as const),
+        bringInquiryForward: () => Promise.resolve(),
       },
+    };
+    registerWebhookRoutes(server, {
+      appmax: ingestion,
+      cryptopay: ingestion,
       pathSecret: new Secret(SECRET),
     });
 

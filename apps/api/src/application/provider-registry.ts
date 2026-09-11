@@ -1,6 +1,10 @@
 import { canServeMethod, hasCapability } from '../domain/provider/provider-capability.js';
 import type { PaymentMethod, ProviderDescriptor } from '../domain/provider/provider-capability.js';
-import type { PixPaymentProvider } from './ports/payment-provider.js';
+import type {
+  CryptoPaymentProvider,
+  PaymentStateReader,
+  PixPaymentProvider,
+} from './ports/payment-provider.js';
 
 /**
  * Chooses which provider serves a payment.
@@ -26,6 +30,7 @@ export interface RegisteredProvider {
    */
   readonly environment: 'SANDBOX' | 'PRODUCTION';
   readonly pix?: PixPaymentProvider;
+  readonly crypto?: CryptoPaymentProvider;
   /**
   Lower runs first. Ties are broken by registration order, so it is total.
   */
@@ -34,6 +39,10 @@ export interface RegisteredProvider {
 
 export type ProviderSelection =
   | { readonly selected: true; readonly provider: PixPaymentProvider }
+  | { readonly selected: false; readonly reason: string };
+
+export type StateReaderSelection =
+  | { readonly selected: true; readonly provider: PaymentStateReader }
   | { readonly selected: false; readonly reason: string };
 
 export class ProviderRegistry {
@@ -64,6 +73,19 @@ export class ProviderRegistry {
       .filter((provider): provider is PixPaymentProvider => provider !== undefined);
   }
 
+  public candidatesForCrypto(
+    currency: string,
+    environment: 'SANDBOX' | 'PRODUCTION',
+  ): CryptoPaymentProvider[] {
+    return this.registered
+      .filter((entry) => entry.crypto !== undefined)
+      .filter((entry) => entry.environment === environment)
+      .filter((entry) => canServeMethod(entry.descriptor, 'crypto', currency))
+      .toSorted((left, right) => left.priority - right.priority)
+      .map((entry) => entry.crypto)
+      .filter((provider): provider is CryptoPaymentProvider => provider !== undefined);
+  }
+
   /**
    * The provider that can be asked about a payment it already handled.
    *
@@ -73,28 +95,31 @@ export class ProviderRegistry {
    * reported as such rather than being called and made to refuse, which would turn
    * a routing fact into a runtime failure.
    */
-  public selectForPixStatus(
+  public selectForStatus(
     providerCode: string,
     environment: 'SANDBOX' | 'PRODUCTION',
-  ): ProviderSelection {
+  ): StateReaderSelection {
     const entry = this.registered.find(
       (candidate) =>
         candidate.descriptor.code === providerCode && candidate.environment === environment,
     );
 
-    if (entry?.pix === undefined) {
+    if (entry === undefined) {
       return {
         selected: false,
         reason: `No ${providerCode} provider is configured for ${environment}, so its payments cannot be inquired about.`,
       };
     }
-    if (!hasCapability(entry.descriptor, 'pix.status')) {
-      return {
-        selected: false,
-        reason: `${providerCode} does not declare pix.status, so it cannot be asked about a payment it created.`,
-      };
+    if (entry.pix !== undefined && hasCapability(entry.descriptor, 'pix.status')) {
+      return { selected: true, provider: entry.pix };
     }
-    return { selected: true, provider: entry.pix };
+    if (entry.crypto !== undefined && hasCapability(entry.descriptor, 'crypto.status')) {
+      return { selected: true, provider: entry.crypto };
+    }
+    return {
+      selected: false,
+      reason: `${providerCode} does not declare a status capability, so it cannot be asked about a payment it created.`,
+    };
   }
 
   public selectForPix(

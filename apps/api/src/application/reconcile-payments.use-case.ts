@@ -398,7 +398,7 @@ async function inquire(
     };
   }
 
-  const selection = dependencies.providers.selectForPixStatus(
+  const selection = dependencies.providers.selectForStatus(
     payment.providerCode,
     payment.environment,
   );

@@ -6,9 +6,12 @@ import {
 } from '../domain/provider/provider-outcome.js';
 import type { ProviderOutcomeClass } from '../domain/provider/provider-outcome.js';
 import { assertPresentableBrCode } from '../domain/pix/br-code.js';
+import type { PaymentMethod, ProviderDescriptor } from '../domain/provider/provider-capability.js';
 import type { ProviderRegistry } from './provider-registry.js';
 import type {
   CreatePixInstrumentRequest,
+  CryptoInstrument,
+  CryptoPaymentProvider,
   PixInstrument,
   PixPaymentProvider,
   ProviderResult,
@@ -32,9 +35,14 @@ export interface PaymentCreationStore {
     readonly organizationId: string;
     readonly environment: 'SANDBOX' | 'PRODUCTION';
     readonly merchantReference: string;
-    readonly paymentMethod: 'pix' | 'card' | 'boleto';
+    readonly paymentMethod: PaymentMethod;
     readonly currency: string;
     readonly expectedAmountMinor: bigint;
+    /**
+     * Where the customer is told the payment went through. Kept on the payment
+     * because the paid event is built from the payment row alone.
+     */
+    readonly customerPhone: string | undefined;
     readonly idempotencyKey: string;
     readonly requestPath: string;
     readonly requestBody: unknown;
@@ -93,25 +101,60 @@ export interface PaymentCreationStore {
     readonly responseStatus: number;
     readonly responseBody: unknown;
     readonly instrumentExpiresAt: Date | undefined;
+    /**
+     * The instrument as it is being presented, kept so a later read of the
+     * payment can show the same destination the customer was given.
+     */
+    readonly instrument: PresentedInstrument | undefined;
   }): Promise<void>;
 }
 
-export interface CreatePaymentInput {
+export type CreatePaymentInput = {
   readonly organizationId: string;
   readonly environment: 'SANDBOX' | 'PRODUCTION';
   readonly merchantReference: string;
   readonly currency: string;
   readonly expectedAmountMinor: bigint;
   readonly description: string;
-  readonly customer: CreatePixInstrumentRequest['customer'];
   readonly idempotencyKey: string;
   readonly requestPath: string;
   readonly requestBody: unknown;
-}
+} & (
+  | {
+      readonly paymentMethod: 'pix';
+      readonly customer: CreatePixInstrumentRequest['customer'];
+    }
+  | {
+      readonly paymentMethod: 'crypto';
+      /**
+       * Optional: the crypto rails need nothing about the payer. What is given is
+       * kept only so the customer can be told when the money arrives.
+       */
+      readonly customerPhone: string | undefined;
+    }
+);
+
+export type PresentedInstrument =
+  | {
+      readonly type: 'pix';
+      readonly copyAndPasteCode: string;
+      readonly qrCodeImageDataUri?: string;
+      readonly expiresAt?: string;
+    }
+  | {
+      readonly type: 'crypto';
+      readonly network: string;
+      readonly asset: string;
+      readonly destinationAddress: string;
+      readonly paymentUri: string;
+      readonly qrCodeImageDataUri: string;
+      readonly expiresAt?: string;
+    };
 
 export interface PaymentView {
   readonly id: string;
   readonly status: string;
+  readonly paymentMethod: PaymentMethod;
   readonly amountMinor: string;
   readonly currency: string;
   readonly merchantReference: string;
@@ -121,11 +164,7 @@ export interface PaymentView {
    */
   readonly failureCode?: string;
   readonly failureReason?: string;
-  readonly instrument?: {
-    readonly copyAndPasteCode: string;
-    readonly qrCodeImageDataUri?: string;
-    readonly expiresAt?: string;
-  };
+  readonly instrument?: PresentedInstrument;
 }
 
 /**
@@ -260,9 +299,10 @@ export async function createPayment(
     organizationId: input.organizationId,
     environment: input.environment,
     merchantReference: input.merchantReference,
-    paymentMethod: 'pix',
+    paymentMethod: input.paymentMethod,
     currency: input.currency,
     expectedAmountMinor: input.expectedAmountMinor,
+    customerPhone: customerPhoneOf(input),
     idempotencyKey: input.idempotencyKey,
     requestPath: input.requestPath,
     requestBody: input.requestBody,
@@ -293,14 +333,10 @@ export async function createPayment(
 
   // The environment comes from the payment, which took it from the API key. A
   // production payment is never served by a sandbox registration.
-  const candidates = dependencies.providers.candidatesForPix(
-    'pix',
-    input.currency,
-    input.environment,
-  );
+  const candidates = candidatesFor(input, dependencies.providers, claimed.publicId);
   if (candidates.length === 0) {
     return await abandonPayment(input, dependencies, claimed.publicId, claimed.paymentId, {
-      reason: `No configured provider can serve pix in ${input.currency} for ${input.environment}.`,
+      reason: `No configured provider can serve ${input.paymentMethod} in ${input.currency} for ${input.environment}.`,
       failureCode: 'no_provider_available',
       responseStatus: RESPONSE_STATUS.no_provider,
       kind: 'no_provider',
@@ -318,15 +354,15 @@ export async function createPayment(
    */
   let lastRefusal = 'Every provider refused the payment.';
 
-  for (const [index, provider] of candidates.entries()) {
+  for (const [index, candidate] of candidates.entries()) {
     const attemptId = await dependencies.store.openAttempt({
       organizationId: input.organizationId,
       paymentId: claimed.paymentId,
       attemptNumber: index + 1,
-      providerCode: provider.descriptor.code,
+      providerCode: candidate.descriptor.code,
     });
 
-    const result = await attemptInstrument(provider, input);
+    const result = await attemptInstrument(candidate);
 
     const outcomeClass: ProviderOutcomeClass = result.outcome;
     const rejection = result.outcome === 'success' ? undefined : result.reason;
@@ -347,9 +383,15 @@ export async function createPayment(
     const failureReason = unusableInstrument ?? rejection;
     const responseStatus = RESPONSE_STATUS[kind];
 
+    const presented =
+      instrument !== undefined && unusableInstrument === undefined
+        ? presentInstrument(instrument)
+        : undefined;
+
     const payment: PaymentView = {
       id: claimed.publicId,
       status: transition.toStatus,
+      paymentMethod: input.paymentMethod,
       amountMinor: input.expectedAmountMinor.toString(),
       currency: input.currency,
       merchantReference: input.merchantReference,
@@ -357,8 +399,7 @@ export async function createPayment(
         failureCode: kind === 'uncertain' ? 'provider_outcome_unknown' : 'provider_rejected',
       }),
       ...(failureReason !== undefined && { failureReason }),
-      ...(instrument !== undefined &&
-        unusableInstrument === undefined && { instrument: presentInstrument(instrument) }),
+      ...(presented !== undefined && { instrument: presented }),
     };
 
     const canTryAnotherProvider =
@@ -384,7 +425,8 @@ export async function createPayment(
       // Only when the instrument is one we are actually presenting. An expiry
       // recorded for a code nobody will see would later expire a payment that
       // never had a live instrument at all.
-      instrumentExpiresAt: unusableInstrument === undefined ? instrument?.expiresAt : undefined,
+      instrumentExpiresAt: presented === undefined ? undefined : expiryOf(instrument),
+      instrument: presented,
     });
 
     if (kind === 'created') {
@@ -421,6 +463,92 @@ export async function createPayment(
 }
 
 /**
+ * What a provider issued, tagged by kind so the checks that follow cannot apply
+ * a Pix rule to a crypto destination or the other way round.
+ */
+type IssuedInstrument =
+  | { readonly kind: 'pix'; readonly pix: PixInstrument }
+  | { readonly kind: 'crypto'; readonly crypto: CryptoInstrument };
+
+/**
+ * One provider that could serve this payment, closed over the request it would
+ * be asked to serve. Failover iterates these without knowing which rails they
+ * are, which is the whole reason the loop above stays one loop.
+ */
+interface RoutingCandidate {
+  readonly descriptor: ProviderDescriptor;
+  issue(): Promise<ProviderResult<IssuedInstrument>>;
+}
+
+function candidatesFor(
+  input: CreatePaymentInput,
+  registry: ProviderRegistry,
+  paymentId: string,
+): RoutingCandidate[] {
+  if (input.paymentMethod === 'pix') {
+    return registry
+      .candidatesForPix('pix', input.currency, input.environment)
+      .map((provider) => pixCandidate(provider, input));
+  }
+  return registry
+    .candidatesForCrypto(input.currency, input.environment)
+    .map((provider) => cryptoCandidate(provider, input, paymentId));
+}
+
+function pixCandidate(
+  provider: PixPaymentProvider,
+  input: CreatePaymentInput & { readonly paymentMethod: 'pix' },
+): RoutingCandidate {
+  return {
+    descriptor: provider.descriptor,
+    issue: async () => {
+      const result = await provider.createPixInstrument({
+        amountMinor: input.expectedAmountMinor,
+        currency: input.currency,
+        description: input.description,
+        reference: input.merchantReference,
+        customer: input.customer,
+      });
+      return result.outcome === 'success'
+        ? { ...result, value: { kind: 'pix', pix: result.value } }
+        : result;
+    },
+  };
+}
+
+function cryptoCandidate(
+  provider: CryptoPaymentProvider,
+  input: CreatePaymentInput,
+  paymentId: string,
+): RoutingCandidate {
+  return {
+    descriptor: provider.descriptor,
+    issue: async () => {
+      const result = await provider.createCryptoInstrument({
+        amountMinor: input.expectedAmountMinor,
+        currency: input.currency,
+        description: input.description,
+        paymentId,
+        merchantReference: input.merchantReference,
+        // Our own claim key, so a retry of the same merchant request reaches the
+        // provider as the same request and is answered with the same destination.
+        idempotencyKey: input.idempotencyKey,
+      });
+      return result.outcome === 'success'
+        ? { ...result, value: { kind: 'crypto', crypto: result.value } }
+        : result;
+    },
+  };
+}
+
+function customerPhoneOf(input: CreatePaymentInput): string | undefined {
+  if (input.paymentMethod === 'pix') {
+    return input.customer.phone;
+  }
+  return input.customerPhone;
+}
+
+/**
  * Calls the provider, turning an exception into an outcome rather than letting it
  * escape.
  *
@@ -430,17 +558,10 @@ export async function createPayment(
  * so the only honest reading is that we do not know.
  */
 async function attemptInstrument(
-  provider: PixPaymentProvider,
-  input: CreatePaymentInput,
-): Promise<ProviderResult<PixInstrument>> {
+  candidate: RoutingCandidate,
+): Promise<ProviderResult<IssuedInstrument>> {
   try {
-    return await provider.createPixInstrument({
-      amountMinor: input.expectedAmountMinor,
-      currency: input.currency,
-      description: input.description,
-      reference: input.merchantReference,
-      customer: input.customer,
-    });
+    return await candidate.issue();
   } catch (error) {
     return {
       outcome: 'unknown_outcome',
@@ -473,6 +594,7 @@ async function abandonPayment(
   const payment: PaymentView = {
     id: publicId,
     status: 'failed',
+    paymentMethod: input.paymentMethod,
     amountMinor: input.expectedAmountMinor.toString(),
     currency: input.currency,
     merchantReference: input.merchantReference,
@@ -509,23 +631,49 @@ function outcomeKind(outcome: ProviderOutcomeClass): 'created' | 'uncertain' | '
 }
 
 function rejectUnusableInstrument(
-  instrument: PixInstrument,
+  instrument: IssuedInstrument,
   expectedAmountMinor: bigint,
 ): string | undefined {
+  if (instrument.kind === 'crypto') {
+    // The destination asks the customer for a fixed amount. One that differs from
+    // what the merchant requested must never be shown, however it came about.
+    return instrument.crypto.amountMinor === expectedAmountMinor
+      ? undefined
+      : `The provider issued a destination for ${instrument.crypto.amountMinor} minor units, not the ${expectedAmountMinor} requested.`;
+  }
   try {
-    assertPresentableBrCode(instrument.copyAndPasteCode, expectedAmountMinor);
+    assertPresentableBrCode(instrument.pix.copyAndPasteCode, expectedAmountMinor);
     return undefined;
   } catch (error) {
     return error instanceof Error ? error.message : 'The Pix code could not be validated.';
   }
 }
 
-function presentInstrument(instrument: PixInstrument): NonNullable<PaymentView['instrument']> {
+function expiryOf(instrument: IssuedInstrument | undefined): Date | undefined {
+  if (instrument === undefined) {
+    return undefined;
+  }
+  return instrument.kind === 'pix' ? instrument.pix.expiresAt : instrument.crypto.expiresAt;
+}
+
+function presentInstrument(instrument: IssuedInstrument): PresentedInstrument {
+  if (instrument.kind === 'crypto') {
+    const { crypto } = instrument;
+    return {
+      type: 'crypto',
+      network: crypto.network,
+      asset: crypto.asset,
+      destinationAddress: crypto.destinationAddress,
+      paymentUri: crypto.paymentUri,
+      qrCodeImageDataUri: crypto.qrCodeImageDataUri,
+      ...(crypto.expiresAt !== undefined && { expiresAt: crypto.expiresAt.toISOString() }),
+    };
+  }
+  const { pix } = instrument;
   return {
-    copyAndPasteCode: instrument.copyAndPasteCode,
-    ...(instrument.qrCodeImageDataUri !== undefined && {
-      qrCodeImageDataUri: instrument.qrCodeImageDataUri,
-    }),
-    ...(instrument.expiresAt !== undefined && { expiresAt: instrument.expiresAt.toISOString() }),
+    type: 'pix',
+    copyAndPasteCode: pix.copyAndPasteCode,
+    ...(pix.qrCodeImageDataUri !== undefined && { qrCodeImageDataUri: pix.qrCodeImageDataUri }),
+    ...(pix.expiresAt !== undefined && { expiresAt: pix.expiresAt.toISOString() }),
   };
 }

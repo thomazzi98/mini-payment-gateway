@@ -288,7 +288,7 @@ describe('a payment cannot disagree with its own money', () => {
   });
 
   it('refuses a payment method the gateway does not implement', async () => {
-    await expect(insertPayment({ paymentMethod: 'crypto' })).rejects.toThrow(/payment_method/);
+    await expect(insertPayment({ paymentMethod: 'voucher' })).rejects.toThrow(/payment_method/);
   });
 });
 

@@ -5,6 +5,9 @@ export interface CurrencyDefinition {
 
 export const SUPPORTED_CURRENCIES = {
   BRL: { code: 'BRL', minorUnitExponent: 2 },
+  // A crypto asset is a currency here in the only sense the gateway needs: a code
+  // and the number of decimals its minor unit carries. USDC has six, not eighteen.
+  USDC: { code: 'USDC', minorUnitExponent: 6 },
 } as const satisfies Record<string, CurrencyDefinition>;
 
 export type CurrencyCode = keyof typeof SUPPORTED_CURRENCIES;

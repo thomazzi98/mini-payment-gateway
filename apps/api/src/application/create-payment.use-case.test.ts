@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { payableBrCode } from '../domain/pix/br-code.test-support.js';
 import { createPayment } from './create-payment.use-case.js';
-import type { CreatePaymentInput, PaymentCreationStore } from './create-payment.use-case.js';
+import type {
+  CreatePaymentInput,
+  CreatePaymentOutcome,
+  PaymentCreationStore,
+  PresentedInstrument,
+} from './create-payment.use-case.js';
 import { ProviderRegistry } from './provider-registry.js';
 import type {
   PixInstrument,
@@ -98,6 +103,16 @@ function paymentOf(outcome: Awaited<ReturnType<typeof createPayment>>) {
   return outcome.payment;
 }
 
+function pixInstrumentOf(
+  outcome: CreatePaymentOutcome,
+): PresentedInstrument & { readonly type: 'pix' } {
+  const instrument = paymentOf(outcome).instrument;
+  if (instrument?.type !== 'pix') {
+    throw new Error('expected a pix instrument');
+  }
+  return instrument;
+}
+
 function reasonOf(outcome: Awaited<ReturnType<typeof createPayment>>): string {
   if (!('reason' in outcome)) {
     throw new Error(`expected an outcome carrying a reason, got ${outcome.kind}`);
@@ -125,6 +140,7 @@ const INPUT: CreatePaymentInput = {
   organizationId: 'organization-1',
   environment: 'SANDBOX',
   merchantReference: 'order-1',
+  paymentMethod: 'pix',
   currency: 'BRL',
   expectedAmountMinor: 1000n,
   description: 'A digital thing',
@@ -160,7 +176,7 @@ describe('a payment that succeeds', () => {
     });
 
     expect(outcome.kind).toBe('created');
-    expect(paymentOf(outcome).instrument?.copyAndPasteCode).toBe(payableBrCode('10.00'));
+    expect(pixInstrumentOf(outcome).copyAndPasteCode).toBe(payableBrCode('10.00'));
     expect(paymentOf(outcome).status).toBe('awaiting_payment');
     // Money leaves as a string, so a large amount cannot silently lose precision
     // passing through a JSON number.

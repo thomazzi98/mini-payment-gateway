@@ -7,14 +7,17 @@ import {
   fingerprintRequest,
 } from '../../domain/idempotency/idempotency.js';
 import type { IdempotencyDecision } from '../../domain/idempotency/idempotency.js';
+import type { PaymentMethod } from '../../domain/provider/provider-capability.js';
+import type { PresentedInstrument } from '../../application/create-payment.use-case.js';
 
 export interface CreatePaymentCommand {
   readonly organizationId: string;
   readonly environment: 'SANDBOX' | 'PRODUCTION';
   readonly merchantReference: string;
-  readonly paymentMethod: 'pix' | 'card' | 'boleto';
+  readonly paymentMethod: PaymentMethod;
   readonly currency: string;
   readonly expectedAmountMinor: bigint;
+  readonly customerPhone: string | undefined;
   readonly idempotencyKey: string;
   readonly requestPath: string;
   /**
@@ -81,6 +84,11 @@ export interface ApplyOutcomeCommand {
    * without it, nothing knows a Pix code has died.
    */
   readonly instrumentExpiresAt: Date | undefined;
+  /**
+   * What the customer was shown, kept on the attempt that issued it. A later read
+   * of the payment presents this rather than asking the provider again.
+   */
+  readonly instrument: PresentedInstrument | undefined;
 }
 
 interface ExistingRecordRow {
@@ -177,8 +185,8 @@ export class PaymentCreationRepository {
     const payment = await client.query<{ id: string }>(
       `INSERT INTO payments
          (public_id, organization_id, environment, merchant_reference, payment_method,
-          currency, expected_amount_minor)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+          currency, expected_amount_minor, customer_phone)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING id`,
       [
         publicId,
@@ -188,6 +196,7 @@ export class PaymentCreationRepository {
         command.paymentMethod,
         command.currency,
         command.expectedAmountMinor.toString(),
+        command.customerPhone ?? null,
       ],
     );
 
@@ -382,13 +391,14 @@ export class PaymentCreationRepository {
       await client.query(
         `UPDATE payment_attempts
             SET outcome_class = $2, provider_reference = $3, failure_reason = $4,
-                finished_at = now()
+                instrument = $5, finished_at = now()
           WHERE id = $1`,
         [
           command.attemptId,
           command.outcomeClass,
           command.providerReference ?? null,
           command.failureReason ?? null,
+          command.instrument === undefined ? null : JSON.stringify(command.instrument),
         ],
       );
 

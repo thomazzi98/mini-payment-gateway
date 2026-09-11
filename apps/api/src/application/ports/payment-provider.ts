@@ -41,6 +41,47 @@ export interface PixInstrument {
   readonly expiresAt: Date | undefined;
 }
 
+export interface CreateCryptoInstrumentRequest {
+  readonly amountMinor: bigint;
+  readonly currency: string;
+  readonly description: string;
+  /**
+   * Our payment's public identifier. Unique forever, unlike a merchant reference,
+   * which is free again once an earlier payment for it has finished, so it is
+   * what the provider is asked to correlate on.
+   */
+  readonly paymentId: string;
+  readonly merchantReference: string;
+  /**
+   * The key the provider deduplicates on. A retried creation after a timeout
+   * must be given the same one, or the customer is handed two destinations for
+   * one order.
+   */
+  readonly idempotencyKey: string;
+}
+
+/**
+ * A crypto payment destination the customer can pay, in ledger vocabulary.
+ *
+ * Nothing here names a chain id, a contract or a URI scheme: the provider chose
+ * the network for us and rendered the URI and the QR code for it. The gateway
+ * presents them and never has to know how they were built.
+ */
+export interface CryptoInstrument {
+  readonly network: string;
+  readonly asset: string;
+  readonly destinationAddress: string;
+  readonly paymentUri: string;
+  readonly qrCodeImageDataUri: string;
+  /**
+   * What the provider will accept, in our minor units, so the gateway can refuse
+   * a destination that asks the customer for a different amount than the merchant
+   * requested.
+   */
+  readonly amountMinor: bigint;
+  readonly expiresAt: Date | undefined;
+}
+
 /**
  * What the gateway believes about a payment after reading provider state.
  *
@@ -108,6 +149,29 @@ export interface PixPaymentProvider {
    */
   readPaymentState(providerReference: string): Promise<ProviderResult<ObservedPaymentState>>;
 }
+
+/**
+ * A provider that can issue crypto payment destinations.
+ *
+ * Reading state has the same shape as for Pix on purpose: reconciliation and the
+ * webhook path are provider-agnostic, and the same authenticated read is the
+ * only thing permitted to fund a crypto payment.
+ */
+export interface CryptoPaymentProvider {
+  readonly descriptor: ProviderDescriptor;
+
+  createCryptoInstrument(
+    request: CreateCryptoInstrumentRequest,
+  ): Promise<ProviderResult<CryptoInstrument>>;
+
+  readPaymentState(providerReference: string): Promise<ProviderResult<ObservedPaymentState>>;
+}
+
+/**
+ * The part of any provider reconciliation talks to. Which kind of instrument a
+ * provider issued is irrelevant to asking it what became of one.
+ */
+export type PaymentStateReader = Pick<PixPaymentProvider, 'readPaymentState'>;
 
 export interface RefundCapableProvider {
   readonly descriptor: ProviderDescriptor;

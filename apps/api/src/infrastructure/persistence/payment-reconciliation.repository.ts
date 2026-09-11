@@ -100,8 +100,11 @@ export class PaymentReconciliationRepository implements ReconciliationStore, Str
         environment: string;
         currency: string;
         merchant_reference: string;
+        payment_method: string;
+        customer_phone: string | null;
       }>(
-        `SELECT status, public_id, environment, currency, merchant_reference
+        `SELECT status, public_id, environment, currency, merchant_reference,
+                payment_method, customer_phone
            FROM payments WHERE id = $1 FOR UPDATE`,
         [command.paymentId],
       );
@@ -125,6 +128,8 @@ export class PaymentReconciliationRepository implements ReconciliationStore, Str
           environment: currentRow.environment,
           currency: currentRow.currency,
           merchantReference: currentRow.merchant_reference,
+          paymentMethod: currentRow.payment_method,
+          customerPhone: currentRow.customer_phone ?? undefined,
           providerCode: command.providerCode,
           providerReference: command.providerReference,
         },
